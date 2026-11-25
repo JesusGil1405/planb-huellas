@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.22
+ * Version: 1.7.23
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.22');
+define('PLANB_CONECTOR_VERSION', '1.7.23');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -177,7 +177,11 @@ function planb_importar_copia(WP_REST_Request $req)
     // 1.7.21 (auditoría 1.2): la copia solo se baja de la web de origen de la mudanza (o del propio panel), nunca de otro sitio
     $hu = strtolower((string)parse_url($url, PHP_URL_HOST)); $hv = strtolower((string)parse_url($viejo, PHP_URL_HOST));
     $sinW = function ($h) { return preg_replace('/^www\./', '', $h); };
-    if ($sinW($hu) !== $sinW($hv) && !planb_host_del_panel($hu)) return new WP_Error('planb', 'La copia no viene de la web de origen', array('status' => 400));
+    if ($sinW($hu) !== $sinW($hv)) return new WP_Error('planb', 'La copia no viene de la web de origen', array('status' => 400)); // 1.7.23: ya no vale desde el panel (no se usaba)
+    // 1.7.23 (blindaje): una mudanza solo se pone encima de un WordPress RECIÉN PUESTO (casi sin contenido). Así, ni con el panel
+    // en malas manos se puede machacar una web de cliente con la copia de otra.
+    $hay = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status NOT IN ('auto-draft','trash','inherit') AND post_type NOT IN ('revision','nav_menu_item','customize_changeset','oembed_cache','user_request','wp_global_styles','wp_navigation','wp_template','wp_template_part','wp_font_family','wp_font_face','attachment')");
+    if ($hay > 15) return new WP_Error('planb', 'Esta web ya tiene contenido (' . $hay . ' entradas o páginas): solo se muda encima de un WordPress recién puesto', array('status' => 409));
     if (!class_exists('ZipArchive')) return new WP_Error('sin_zip', 'El servidor no tiene ZipArchive', array('status' => 500));
     planb_imp_estado('bajando');
     $dir = planb_dir_copias();

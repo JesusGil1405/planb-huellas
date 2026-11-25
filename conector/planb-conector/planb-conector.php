@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.30
+ * Version: 1.7.31
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.30');
+define('PLANB_CONECTOR_VERSION', '1.7.31');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -1351,6 +1351,35 @@ function planb_elementor_diag(WP_REST_Request $req)
         foreach (array_reverse(explode("\n", $txt)) as $l) { if (stripos($l, 'ocean') !== false || stripos($l, 'elementor') !== false) { $log[] = substr($l, 0, 400); if (count($log) >= 15) break; } }
     }
     $r['errores'] = $log;
+    // 1.7.31: quién engancha a Elementor, qué clases de Ocean hay cargadas y qué condiciones tiene el código de Ocean Elementor Widgets
+    global $wp_filter;
+    $gan = array();
+    foreach (array('elementor/widgets/register', 'elementor/widgets/widgets_registered', 'elementor/init', 'elementor/loaded', 'plugins_loaded', 'after_setup_theme', 'init') as $h) {
+        if (empty($wp_filter[$h])) continue;
+        foreach ($wp_filter[$h]->callbacks as $prio => $cbs) foreach ($cbs as $cb) {
+            $f = $cb['function']; $n = '';
+            if (is_string($f)) $n = $f; elseif (is_array($f)) $n = (is_object($f[0]) ? get_class($f[0]) : (string)$f[0]) . '::' . (string)$f[1]; elseif (is_object($f)) $n = get_class($f);
+            if (stripos($n, 'oew') !== false || stripos($n, 'ocean') !== false) $gan[] = $h . ' ' . $prio . ' ' . $n;
+        }
+    }
+    $r['enganches'] = $gan;
+    $cl = array(); foreach (get_declared_classes() as $c) if (stripos($c, 'oew') !== false || stripos($c, 'ocean') !== false) $cl[] = $c;
+    $r['clases_ocean'] = array_slice($cl, 0, 80);
+    $cod = array();
+    $base = WP_PLUGIN_DIR . '/ocean-elementor-widgets';
+    foreach (array('ocean-elementor-widgets.php', 'includes/plugin.php') as $f) {
+        if (!is_file($base . '/' . $f)) { $cod[] = $f . ': NO EXISTE'; continue; }
+        foreach (file($base . '/' . $f) as $i => $l) {
+            if (preg_match('/(return\b|get_option|license|licen|wp_get_theme|->name|template|version_compare|is_admin|did_action|class_exists|defined\(|add_action\(|require)/i', $l)) $cod[] = $f . ':' . ($i + 1) . ' ' . substr(trim($l), 0, 170);
+            if (count($cod) >= 120) break 2;
+        }
+    }
+    $r['oew_codigo'] = $cod;
+    $ops2 = array();
+    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 400) v FROM {$wpdb->options} WHERE option_name LIKE '%oew%' OR option_name LIKE '%elementor_widget%' OR option_name LIKE '%licen%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'oceanwp%' LIMIT 60") as $o) $ops2[$o->option_name] = $o->v;
+    $r['opciones_oew'] = $ops2;
+    $th = wp_get_theme();
+    $r['tema_nombre'] = $th->get('Name') . ' / plantilla ' . $th->get_template() . ' / ' . $th->get('Version');
     return $r;
 }
 /** 1.7.29 · Borra la caché de elementos de Elementor (lo ya pintado de cada bloque) y sus archivos CSS. */

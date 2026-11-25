@@ -304,7 +304,7 @@ function planb_escanear(WP_REST_Request $req)
         if (preg_match('/(_events|_log|_logs|logs?_|_audit|_activity|_stats|_visits?|_404|redirection_|wfhits|wflogs|wfblock|_sessions|actionscheduler)/i', substr($t, strlen($wpdb->prefix)))) continue;
         // 1.7.28: pedidos de la tienda (direcciones y nombres de clientes: «Casino Conde Luna» es un sitio de verdad) y
         // avisos internos de plugins (AIOSEO guarda texto codificado): no son lo que se ve en la web y daban falsos avisos
-        if (preg_match('/(wc_orders|wc_order_|woocommerce_order_|aioseo_notifications|wc_customer_lookup|wc_admin_notes)/i', substr($t, strlen($wpdb->prefix)))) continue;
+        if (preg_match('/(wc_orders|wc_order_|woocommerce_order_|aioseo_notifications|wc_customer_lookup|wc_admin_notes|wpml_mails|mail_logging|wp_mail_log|email_log|post_smtp_logs|wpmailsmtp_)/i', substr($t, strlen($wpdb->prefix)))) continue;
         $porTabla = 0;
         $cols = $wpdb->get_results('SHOW COLUMNS FROM `' . esc_sql($t) . '`', ARRAY_A);
         $pk = null; $txt = array();

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.34
+ * Version: 1.7.35
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.34');
+define('PLANB_CONECTOR_VERSION', '1.7.35');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -1289,6 +1289,7 @@ function planb_oew_arranque(WP_REST_Request $req)
        . "    global \$wp_filter;\n"
        . "    foreach (\$wp_filter as \$h) { if (!is_object(\$h) || empty(\$h->callbacks)) continue; foreach (\$h->callbacks as \$cbs) foreach (\$cbs as \$cb) if (is_array(\$cb['function']) && isset(\$cb['function'][1]) && \$cb['function'][1] === 'setup' && \$cb['function'][0] instanceof Ocean_Elementor_Widgets) return; }\n"
        . "    \$o = Ocean_Elementor_Widgets::instance(); if (method_exists(\$o, 'setup')) \$o->setup();\n"
+       . "    \$u = (int)get_option('planb_oew_arranque_usado'); if (time() - \$u > 3600) update_option('planb_oew_arranque_usado', time(), false);\n"
        . "}, -1);\n";
     $ok = @file_put_contents($f, $c) !== false;
     return array('puesto' => $ok);
@@ -1431,6 +1432,12 @@ function planb_elementor_diag(WP_REST_Request $req)
     $r['owp_tests_donde'] = $donde;
     $mu = array(); foreach ((array)glob(WPMU_PLUGIN_DIR . '/*') as $f) $mu[] = basename($f) . ' ' . @filesize($f);
     $r['mu_plugins'] = $mu;
+    // 1.7.35: el arranque de Ocean Elementor Widgets tal cual (líneas 100-250 del archivo principal) y si el parche del panel ha hecho falta
+    $prin = array();
+    if (is_file($base . '/ocean-elementor-widgets.php')) { $ls = file($base . '/ocean-elementor-widgets.php'); for ($i = 99; $i < min(count($ls), 250); $i++) { $t = rtrim($ls[$i]); if (trim($t) !== '' && strpos(ltrim($t), '*') !== 0 && strpos(ltrim($t), '/') !== 0) $prin[] = ($i + 1) . ' ' . substr($t, 0, 170); } }
+    $r['oew_principal'] = $prin;
+    $r['arranque_usado'] = get_option('planb_oew_arranque_usado');
+    $r['tema_opciones'] = array('template' => get_option('template'), 'stylesheet' => get_option('stylesheet'), 'current_theme' => get_option('current_theme'));
     $ops2 = array();
     foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 400) v FROM {$wpdb->options} WHERE option_name LIKE '%oew%' OR option_name LIKE '%elementor_widget%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'oceanwp%' LIMIT 60") as $o) $ops2[$o->option_name] = $o->v;
     $r['opciones_oew'] = $ops2;

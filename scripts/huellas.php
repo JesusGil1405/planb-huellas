@@ -52,7 +52,8 @@ if ($tok) {
     try {
         foreach (['wordpress-plugins' => 'wordpress_plugin', 'wordpress-themes' => 'wordpress_theme'] as $filtro => $campo) {
             for ($pag = 1; $pag <= 10; $pag++) {
-                $r = $api('/v3/market/buyer/list-purchases?filter_by=' . $filtro . '&page=' . $pag);
+                try { $r = $api('/v3/market/buyer/list-purchases?filter_by=' . $filtro . '&page=' . $pag); }
+                catch (Throwable $e) { echo "Lista $filtro página $pag: " . $e->getMessage() . "\n"; break; } // 404 = no hay más páginas
                 $res = (array)($r['results'] ?? []);
                 foreach ($res as $x) {
                     $it = (array)($x['item'] ?? []); $id = (int)($it['id'] ?? 0);
@@ -60,7 +61,8 @@ if ($tok) {
                     $meta = (array)($it['wordpress_plugin_metadata'] ?? $it['wordpress_theme_metadata'] ?? []);
                     $ver = (string)($meta['version'] ?? $it['updated_at'] ?? '');
                     if (($h['envato_versiones'][(string)$id] ?? '') === $ver) continue; // ya tenemos la huella de esta versión
-                    $d = $api('/v3/market/buyer/download?item_id=' . $id);
+                    try { $d = $api('/v3/market/buyer/download?item_id=' . $id); }
+                    catch (Throwable $e) { echo "Descarga $id: " . $e->getMessage() . "\n"; continue; }
                     $url = (string)($d[$campo] ?? $d['download_url'] ?? '');
                     if (!preg_match('#^https://#', $url)) continue;
                     $tmp = tempnam(sys_get_temp_dir(), 'env');

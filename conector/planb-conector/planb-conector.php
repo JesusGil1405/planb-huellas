@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.24
+ * Version: 1.7.25
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.24');
+define('PLANB_CONECTOR_VERSION', '1.7.25');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -458,14 +458,16 @@ add_filter('http_request_args', function ($args, $url) {
  * Lo que el panel manda instalar (este conector y los plugins de pago) se comprueba ANTES contra una lista pública
  * de huellas que publica un verificador en GitHub, fuera del servidor del panel. Si alguien tocara el panel, lo que
  * preparase allí no estaría en la lista y esta web no lo instalaría. Sin claves ni contraseñas: todo es público. */
-if (!defined('PLANB_HUELLAS_URL')) define('PLANB_HUELLAS_URL', 'https://raw.githubusercontent.com/JesusGil1405/planb-huellas/main/huellas.json');
+// 1.7.25: la pone el panel al empaquetar (cada panel tiene su propia lista; por defecto, la de Plan B)
+if (!defined('PLANB_HUELLAS_URL')) define('PLANB_HUELLAS_URL', '__HUELLAS_URL__');
 
 /** La lista de huellas (10 minutos en memoria). null si no se ha podido leer. */
 function planb_huellas($fresca = false)
 {
     $c = $fresca ? false : get_transient('planb_huellas');
     if (is_array($c)) return $c;
-    $r = wp_remote_get(PLANB_HUELLAS_URL . '?v=' . floor(time() / 60), array('timeout' => 20, 'sslverify' => true, 'redirection' => 0));
+    $hu = strpos(PLANB_HUELLAS_URL, 'https://') === 0 ? PLANB_HUELLAS_URL : 'https://raw.githubusercontent.com/JesusGil1405/planb-huellas/main/huellas.json';
+    $r = wp_remote_get($hu . '?v=' . floor(time() / 60), array('timeout' => 20, 'sslverify' => true, 'redirection' => 0));
     if (is_wp_error($r) || (int)wp_remote_retrieve_response_code($r) !== 200) return null;
     $h = json_decode((string)wp_remote_retrieve_body($r), true);
     if (!is_array($h) || empty($h['formato']) || !isset($h['conector']) || !is_array($h['conector'])) return null;
@@ -1489,6 +1491,7 @@ function planb_clonar(WP_REST_Request $req)
     $carpeta = preg_replace('/[^a-z0-9-]/', '', (string)$req->get_param('carpeta'));
     $prefijo = preg_replace('/[^a-z0-9_]/', '', (string)$req->get_param('prefijo'));
     $url = esc_url_raw((string)$req->get_param('url'));
+    $llave = preg_replace('/[^a-f0-9]/', '', (string)$req->get_param('llave')); // 1.7.25 (auditoría 2.9): copia de pruebas privada
     $dentro = (bool)$req->get_param('dentro'); // sin API de Plesk: el clon va en una carpeta DENTRO de la web (https://dominio/planb-clon-xxxx/)
     if (strpos($carpeta, 'planb-clon') !== 0 || strpos($prefijo, 'pbc') !== 0 || !$url) return new WP_Error('param', 'Parámetros no válidos', array('status' => 400));
     $raiz = rtrim(ABSPATH, '/');
@@ -1536,6 +1539,15 @@ function planb_clonar(WP_REST_Request $req)
     if ($cfg === false) return new WP_Error('config', 'No se encontró wp-config.php', array('status' => 500));
     $cfg = preg_replace('/\$table_prefix\s*=\s*[\'"][^\'"]*[\'"]\s*;/', "\$table_prefix = '$prefijo';", $cfg);
     $extra = "define('WP_HOME', '" . addslashes(untrailingslashit($url)) . "');\ndefine('WP_SITEURL', '" . addslashes(untrailingslashit($url)) . "');\ndefine('DISABLE_WP_CRON', true);\ndefine('PLANB_ES_CLON', true);\n";
+    if (strlen($llave) >= 32) {
+        // Solo entra quien abre el enlace con la llave (queda una cookie 7 días), las llamadas a la API del conector (que
+        // comprueba su firma) y,
+        // durante los primeros 15 minutos, las comprobaciones automáticas. Para todos los demás: 403.
+        $extra .= "if (PHP_SAPI !== 'cli' && !defined('WP_CLI')) { \$pbL = '" . $llave . "'; \$pbOk = time() < " . (time() + 900) . " || (!empty(\$_SERVER['HTTP_X_PLANB_FIRMA']) && strpos(urldecode((string)\$_SERVER['REQUEST_URI']), 'planb/v1/') !== false)"
+            . " || (isset(\$_COOKIE['planb_clon']) && hash_equals(\$pbL, (string)\$_COOKIE['planb_clon']));"
+            . " if (isset(\$_GET['planb_clon']) && hash_equals(\$pbL, (string)\$_GET['planb_clon'])) { \$pbOk = true; setcookie('planb_clon', \$pbL, time() + 7 * 86400, '/', '', !empty(\$_SERVER['HTTPS']), true); }"
+            . " if (!\$pbOk) { http_response_code(403); header('X-Robots-Tag: noindex'); exit('Copia de pruebas privada. Abre el enlace que te ha dado tu agencia.'); } }\n";
+    }
     $cfg = preg_replace('/<\?php/', "<?php\n" . $extra, $cfg, 1);
     file_put_contents($destino . '/wp-config.php', $cfg);
     file_put_contents($destino . '/robots.txt', "User-agent: *\nDisallow: /\n");

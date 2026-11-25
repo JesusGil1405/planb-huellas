@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.29
+ * Version: 1.7.30
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.29');
+define('PLANB_CONECTOR_VERSION', '1.7.30');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -728,6 +728,7 @@ add_action('rest_api_init', function () {
         'cobros' => array('GET', 'planb_cobros'),
         'elementor-diag' => array('GET', 'planb_elementor_diag'),
         'elementor-arreglar' => array('POST', 'planb_elementor_arreglar'),
+        'empaquetar-plugin' => array('POST', 'planb_empaquetar_plugin'),
         'escudo' => array('POST', 'planb_escudo_ruta'),
         'importar-copia' => array('POST', 'planb_importar_copia'),
         'importacion' => array('GET', 'planb_importacion'),
@@ -1270,6 +1271,38 @@ function planb_vaciar_caches()
     return $hecho;
 }
 function planb_vaciar_caches_ruta(WP_REST_Request $req) { return array('caches' => planb_vaciar_caches()); }
+
+/**
+ * 1.7.30 · Empaqueta un plugin instalado tal cual (para copiarlo a otra web del panel cuando en esa está dañado; Jesús,
+ * 25/11/2026, León/Oviedo). Devuelve el zip en base64 al panel, que es quien lo instala en la otra web con su huella.
+ */
+function planb_empaquetar_plugin(WP_REST_Request $req)
+{
+    $slug = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)$req->get_param('slug'));
+    $dir = WP_PLUGIN_DIR . '/' . $slug;
+    if ($slug === '' || $slug === 'planb-conector' || !is_dir($dir)) return new WP_Error('no', 'Esta web no tiene ese plugin', array('status' => 404));
+    if (!class_exists('ZipArchive')) return new WP_Error('zip', 'El servidor no tiene ZipArchive', array('status' => 500));
+    @set_time_limit(300);
+    planb_cargar_admin();
+    $tmp = wp_tempnam('planb-pl');
+    $z = new ZipArchive();
+    if ($z->open($tmp, ZipArchive::OVERWRITE | ZipArchive::CREATE) !== true) return new WP_Error('zip', 'No se pudo crear el zip', array('status' => 500));
+    $n = 0; $tam = 0;
+    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+    foreach ($it as $f) {
+        $rel = $slug . '/' . str_replace('\\', '/', substr($f->getPathname(), strlen($dir) + 1));
+        if ($f->isDir()) { $z->addEmptyDir($rel); continue; }
+        if ($f->isLink()) continue;
+        $tam += $f->getSize();
+        if ($tam > 60 * 1048576) { $z->close(); @unlink($tmp); return new WP_Error('grande', 'El plugin ocupa más de 60 MB', array('status' => 413)); }
+        $z->addFile($f->getPathname(), $rel); $n++;
+    }
+    $z->close();
+    $datos = (string)file_get_contents($tmp); @unlink($tmp);
+    $version = '';
+    foreach (get_plugins() as $pf => $pd) if (strpos($pf, $slug . '/') === 0) $version = $pd['Version'];
+    return array('slug' => $slug, 'version' => $version, 'archivos' => $n, 'sha256' => hash('sha256', $datos), 'zip' => base64_encode($datos));
+}
 
 /**
  * 1.7.29 · Diagnóstico de Elementor (Jesús, 25/11/2026: en León los bloques de productos de la portada no salían y no

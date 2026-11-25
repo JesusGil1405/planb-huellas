@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.26
+ * Version: 1.7.27
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.26');
+define('PLANB_CONECTOR_VERSION', '1.7.27');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -725,6 +725,7 @@ add_action('rest_api_init', function () {
         'vaciar-cache' => array('POST', 'planb_vaciar_caches_ruta'),
         'optimizar-bd' => array('POST', 'planb_optimizar_bd'),
         'tienda' => array('GET', 'planb_tienda'),
+        'cobros' => array('GET', 'planb_cobros'),
         'escudo' => array('POST', 'planb_escudo_ruta'),
         'importar-copia' => array('POST', 'planb_importar_copia'),
         'importacion' => array('GET', 'planb_importacion'),
@@ -1937,6 +1938,41 @@ function planb_host_del_panel($host)
     return $host === $mio || $host === 'www.' . $mio || 'www.' . $host === $mio;
 }
 
+
+/**
+ * 1.7.27 · Vigilancia de cobros de la tienda (Jesús, 25/11/2026): cuándo entró el último pedido pagado, cuántos pagos han
+ * fallado en las últimas 24 horas y cómo va cada forma de pago esta semana. Para que el panel avise si una tienda que vende
+ * a diario deja de cobrar (pasarela caída) aunque la web abra bien. Solo números y nombres de formas de pago: ningún dato
+ * de clientes.
+ */
+function planb_cobros(WP_REST_Request $req)
+{
+    if (!class_exists('WooCommerce') || !function_exists('wc_get_orders')) return array('woocommerce' => false);
+    @set_time_limit(90);
+    $ahora = time();
+    $pagados = array('wc-processing', 'wc-completed', 'wc-on-hold');
+    $n30 = wc_get_orders(array('status' => $pagados, 'date_created' => '>' . ($ahora - 30 * 86400), 'limit' => 3000, 'return' => 'ids', 'type' => 'shop_order'));
+    $ult = wc_get_orders(array('status' => $pagados, 'limit' => 1, 'orderby' => 'date', 'order' => 'DESC', 'type' => 'shop_order'));
+    $ultimo = null;
+    if ($ult && $ult[0]->get_date_created()) $ultimo = $ult[0]->get_date_created()->getTimestamp();
+    $fallidos = wc_get_orders(array('status' => array('wc-failed'), 'date_created' => '>' . ($ahora - 86400), 'limit' => 500, 'return' => 'ids', 'type' => 'shop_order'));
+    $atascados = wc_get_orders(array('status' => array('wc-pending'), 'date_created' => ($ahora - 86400) . '...' . ($ahora - 3600), 'limit' => 500, 'return' => 'ids', 'type' => 'shop_order'));
+    $metodos = array();
+    foreach (wc_get_orders(array('status' => array('wc-processing', 'wc-completed', 'wc-on-hold', 'wc-failed', 'wc-pending'), 'date_created' => '>' . ($ahora - 7 * 86400), 'limit' => 1000, 'type' => 'shop_order')) as $o) {
+        $m = (string)$o->get_payment_method_title();
+        if ($m === '') $m = (string)$o->get_payment_method();
+        if ($m === '') continue;
+        if (!isset($metodos[$m])) $metodos[$m] = array('pagados' => 0, 'fallidos' => 0, 'ultimo_pagado' => null, 'ultimo_fallo' => null);
+        $t = $o->get_date_created() ? $o->get_date_created()->getTimestamp() : 0;
+        $st = $o->get_status();
+        if (in_array($st, array('processing', 'completed', 'on-hold'), true)) { $metodos[$m]['pagados']++; if ($t > (int)$metodos[$m]['ultimo_pagado']) $metodos[$m]['ultimo_pagado'] = $t; }
+        elseif ($st === 'failed') { $metodos[$m]['fallidos']++; if ($t > (int)$metodos[$m]['ultimo_fallo']) $metodos[$m]['ultimo_fallo'] = $t; }
+    }
+    $activas = array();
+    if (function_exists('WC') && WC()->payment_gateways()) foreach (WC()->payment_gateways()->get_available_payment_gateways() as $g) $activas[] = (string)$g->get_title();
+    return array('woocommerce' => true, 'ahora' => $ahora, 'pagados_30d' => count($n30), 'ultimo_pagado' => $ultimo, 'fallidos_24h' => count($fallidos),
+        'atascados_24h' => count($atascados), 'metodos' => $metodos, 'formas_activas' => $activas);
+}
 
 /**
  * 1.7.17 · Números de la tienda WooCommerce para los informes (como Modular DS): pedidos y ventas de los últimos 30 días

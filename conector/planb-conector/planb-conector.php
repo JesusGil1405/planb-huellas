@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.32
+ * Version: 1.7.33
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.32');
+define('PLANB_CONECTOR_VERSION', '1.7.33');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -1394,6 +1394,21 @@ function planb_elementor_diag(WP_REST_Request $req)
     foreach ((array)glob($base . '/includes/*manager*.php') as $f) { foreach (file($f) as $i => $l) { $t = rtrim($l); if (trim($t) !== '' && strpos(ltrim($t), '*') !== 0 && strpos(ltrim($t), '/') !== 0) $mm[] = basename($f) . ':' . ($i + 1) . ' ' . substr($t, 0, 160); if (count($mm) >= 150) break 2; } }
     $r['oew_manager'] = $mm;
     $r['orden_plugins'] = array_values((array)get_option('active_plugins'));
+    // 1.7.33: por qué no arranca: la marca de pruebas, el principio y el final de includes/plugin.php y dónde aparece la marca
+    $r['owp_tests_definida'] = defined('OWP_ELEMENTOR_TESTS');
+    $pi = array();
+    if (is_file($base . '/includes/plugin.php')) { $ls = file($base . '/includes/plugin.php'); $n = count($ls); foreach ($ls as $i => $l) { if ($i < 50 || $i >= $n - 25) { $t = rtrim($l); if (trim($t) !== '') $pi[] = ($i + 1) . ' ' . substr($t, 0, 160); } } }
+    $r['oew_plugin_extremos'] = $pi;
+    $donde = array();
+    $mira = array(ABSPATH . 'wp-config.php', dirname(ABSPATH) . '/wp-config.php');
+    foreach ((array)glob(WPMU_PLUGIN_DIR . '/*.php') as $f) $mira[] = $f;
+    foreach ((array)glob(get_template_directory() . '/*.php') as $f) $mira[] = $f;
+    if (get_stylesheet_directory() !== get_template_directory()) foreach ((array)glob(get_stylesheet_directory() . '/*.php') as $f) $mira[] = $f;
+    foreach ((array)glob(WP_PLUGIN_DIR . '/*/*.php') as $f) $mira[] = $f;
+    foreach ($mira as $f) { if (!is_file($f) || filesize($f) > 3000000) continue; $c = (string)@file_get_contents($f); if (strpos($c, 'OWP_ELEMENTOR_TESTS') !== false) $donde[] = str_replace(ABSPATH, '', $f); }
+    $r['owp_tests_donde'] = $donde;
+    $mu = array(); foreach ((array)glob(WPMU_PLUGIN_DIR . '/*') as $f) $mu[] = basename($f) . ' ' . @filesize($f);
+    $r['mu_plugins'] = $mu;
     $ops2 = array();
     foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 400) v FROM {$wpdb->options} WHERE option_name LIKE '%oew%' OR option_name LIKE '%elementor_widget%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'oceanwp%' LIMIT 60") as $o) $ops2[$o->option_name] = $o->v;
     $r['opciones_oew'] = $ops2;

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.33
+ * Version: 1.7.34
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.33');
+define('PLANB_CONECTOR_VERSION', '1.7.34');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -729,6 +729,7 @@ add_action('rest_api_init', function () {
         'elementor-diag' => array('GET', 'planb_elementor_diag'),
         'elementor-arreglar' => array('POST', 'planb_elementor_arreglar'),
         'empaquetar-plugin' => array('POST', 'planb_empaquetar_plugin'),
+        'oew-arranque' => array('POST', 'planb_oew_arranque'),
         'escudo' => array('POST', 'planb_escudo_ruta'),
         'importar-copia' => array('POST', 'planb_importar_copia'),
         'importacion' => array('GET', 'planb_importacion'),
@@ -1273,6 +1274,27 @@ function planb_vaciar_caches()
 function planb_vaciar_caches_ruta(WP_REST_Request $req) { return array('caches' => planb_vaciar_caches()); }
 
 /**
+ * 1.7.34 · Arranque de Ocean Elementor Widgets (León, 25/11/2026): en alguna web su parte principal no arranca y sus bloques
+ * no salen. Un mu-plugin, justo antes de que arranque Elementor, lo arranca SOLO si no ha arrancado y nadie lo va a arrancar.
+ */
+function planb_oew_arranque(WP_REST_Request $req)
+{
+    $f = WPMU_PLUGIN_DIR . '/planb-oew-arranque.php';
+    if (!$req->get_param('poner')) { $q = is_file($f) ? @unlink($f) : true; return array('quitado' => (bool)$q); }
+    if (!is_dir(WPMU_PLUGIN_DIR)) wp_mkdir_p(WPMU_PLUGIN_DIR);
+    $c = "<?php\n/* Plan B: arranca Ocean Elementor Widgets si no ha arrancado (lo pone y lo quita el panel). */\n"
+       . "add_action('init', function () {\n"
+       . "    if (class_exists('owpElementor\\\\owpElementorPlugin', false) || !class_exists('Ocean_Elementor_Widgets', false) || did_action('elementor/init')) return;\n"
+       . "    \$t = wp_get_theme(); if ('OceanWP' !== \$t->get('Name') && 'oceanwp' !== \$t->get_template()) return;\n"
+       . "    global \$wp_filter;\n"
+       . "    foreach (\$wp_filter as \$h) { if (!is_object(\$h) || empty(\$h->callbacks)) continue; foreach (\$h->callbacks as \$cbs) foreach (\$cbs as \$cb) if (is_array(\$cb['function']) && isset(\$cb['function'][1]) && \$cb['function'][1] === 'setup' && \$cb['function'][0] instanceof Ocean_Elementor_Widgets) return; }\n"
+       . "    \$o = Ocean_Elementor_Widgets::instance(); if (method_exists(\$o, 'setup')) \$o->setup();\n"
+       . "}, -1);\n";
+    $ok = @file_put_contents($f, $c) !== false;
+    return array('puesto' => $ok);
+}
+
+/**
  * 1.7.30 · Empaqueta un plugin instalado tal cual (para copiarlo a otra web del panel cuando en esa está dañado; Jesús,
  * 25/11/2026, León/Oviedo). Devuelve el zip en base64 al panel, que es quien lo instala en la otra web con su huella.
  */
@@ -1339,7 +1361,7 @@ function planb_elementor_diag(WP_REST_Request $req)
     $r['plugins_activos'] = array_values((array)get_option('active_plugins'));
     $r['tema'] = get_option('stylesheet') . ' / ' . get_option('template');
     $ops = array();
-    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 300) v FROM {$wpdb->options} WHERE option_name LIKE 'oew%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'ocean%' OR option_name LIKE 'elementor\\_experiment%' OR option_name LIKE 'elementor\\_element\\_cache%' OR option_name LIKE 'elementor\\_disabled%' LIMIT 80") as $o) $ops[$o->option_name] = $o->v;
+    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 300) v FROM {$wpdb->options} WHERE option_name LIKE 'oew%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'ocean%' OR option_name LIKE 'elementor\\_experiment%' OR option_name LIKE 'elementor\\_element\\_cache%' OR option_name LIKE 'elementor\\_disabled%' OR option_name LIKE 'elementor\\_safe%' LIMIT 80") as $o) $ops[$o->option_name] = $o->v;
     $r['opciones'] = $ops;
     $r['cache_elementos'] = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key='_elementor_element_cache'");
     $r['cache_portada'] = (bool)get_post_meta($id, '_elementor_element_cache', true);

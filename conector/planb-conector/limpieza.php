@@ -302,6 +302,9 @@ function planb_escanear(WP_REST_Request $req)
         if (!$por && time() - $inicio > 29) { $out['avisos'][] = 'No ha dado tiempo a revisar toda la base de datos.'; break; }
         // Registros de visitas, ataques y estadísticas: solo guardan lo que se ha visitado, no es lo que se ve en la web
         if (preg_match('/(_events|_log|_logs|logs?_|_audit|_activity|_stats|_visits?|_404|redirection_|wfhits|wflogs|wfblock|_sessions|actionscheduler)/i', substr($t, strlen($wpdb->prefix)))) continue;
+        // 1.7.28: pedidos de la tienda (direcciones y nombres de clientes: «Casino Conde Luna» es un sitio de verdad) y
+        // avisos internos de plugins (AIOSEO guarda texto codificado): no son lo que se ve en la web y daban falsos avisos
+        if (preg_match('/(wc_orders|wc_order_|woocommerce_order_|aioseo_notifications|wc_customer_lookup|wc_admin_notes)/i', substr($t, strlen($wpdb->prefix)))) continue;
         $porTabla = 0;
         $cols = $wpdb->get_results('SHOW COLUMNS FROM `' . esc_sql($t) . '`', ARRAY_A);
         $pk = null; $txt = array();
@@ -327,7 +330,13 @@ function planb_escanear(WP_REST_Request $req)
                 elseif ($t === $wpdb->posts) { $p = get_post((int)$f[$pk]); if ($p && ($p->post_type === 'revision' || $p->post_status === 'trash')) continue; $nombre = $p ? ($p->post_type === 'page' ? 'Página' : $p->post_type) . ': ' . $p->post_title . ($p->post_status !== 'publish' ? ' (' . $p->post_status . ')' : '') . ((int)get_option('page_on_front') === (int)$p->ID ? ' · PORTADA' : '') : ''; }
                 if (strpos($nombre, 'planb_') === 0) continue;
                 if ($t === $wpdb->posts && isset($spamIds[(int)$f[$pk]])) continue; // ya va como entrada de spam (a la papelera entera)
+                // 1.7.28: post_id no es de texto y no viene en la consulta: se busca (antes estas comprobaciones nunca se hacían)
+                if ($t === $wpdb->postmeta && !isset($f['post_id'])) $f['post_id'] = (int)$wpdb->get_var($wpdb->prepare('SELECT post_id FROM `' . esc_sql($t) . '` WHERE meta_id=%d', $f[$pk]));
                 if ($t === $wpdb->postmeta && isset($f['post_id']) && isset($spamIds[(int)$f['post_id']])) continue;
+                // 1.7.28: datos de pedidos de la tienda (dirección, nombre, empresa del comprador): nunca son spam publicado
+                if ($t === $wpdb->postmeta && isset($f['post_id']) && in_array(get_post_type((int)$f['post_id']), array('shop_order', 'shop_order_refund', 'shop_order_placehold', 'shop_subscription'), true)) continue;
+                // 1.7.28: un bloque codificado sin espacios (base64 de plugins) puede contener por azar «1win» o «pinco»: solo cuenta si además lleva código
+                if (!$codigo && strlen($v) > 120 && !preg_match('/\s/', $v) && preg_match('/^[A-Za-z0-9+\/=]+$/', $v)) continue;
                 // Lo que ya está en la papelera no se lista (se quita entero con «Vaciar la papelera del spam»)
                 if ($t === $wpdb->postmeta && isset($f['post_id']) && get_post_status((int)$f['post_id']) === 'trash') continue;
                 if (++$porTabla > 60) continue;

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.28
+ * Version: 1.7.29
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.28');
+define('PLANB_CONECTOR_VERSION', '1.7.29');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -726,6 +726,8 @@ add_action('rest_api_init', function () {
         'optimizar-bd' => array('POST', 'planb_optimizar_bd'),
         'tienda' => array('GET', 'planb_tienda'),
         'cobros' => array('GET', 'planb_cobros'),
+        'elementor-diag' => array('GET', 'planb_elementor_diag'),
+        'elementor-arreglar' => array('POST', 'planb_elementor_arreglar'),
         'escudo' => array('POST', 'planb_escudo_ruta'),
         'importar-copia' => array('POST', 'planb_importar_copia'),
         'importacion' => array('GET', 'planb_importacion'),
@@ -888,7 +890,7 @@ function planb_cargar_admin()
 function planb_reparar_css_clon()
 {
     $dir = wp_upload_dir(null, false);
-    $css = rtrim((string)($dir['basedir'] ?? ''), '/') . '/elementor/css';
+    $css = rtrim((string)(isset($dir['basedir']) ? $dir['basedir'] : ''), '/') . '/elementor/css';
     if (!is_dir($css)) return false;
     $mal = false;
     foreach ((array)glob($css . '/*.css') as $f) { $t = @file_get_contents($f, false, null, 0, 400000); if ($t !== false && strpos($t, '/planb-clon-') !== false) { $mal = true; break; } }
@@ -1268,6 +1270,64 @@ function planb_vaciar_caches()
     return $hecho;
 }
 function planb_vaciar_caches_ruta(WP_REST_Request $req) { return array('caches' => planb_vaciar_caches()); }
+
+/**
+ * 1.7.29 · Diagnóstico de Elementor (Jesús, 25/11/2026: en León los bloques de productos de la portada no salían y no
+ * había acceso al escritorio). Solo lee: qué bloques usa la portada, cuáles conoce Elementor y cuáles no, opciones de
+ * los plugins de Ocean, caché de elementos y los últimos errores del registro que hablen de Elementor u Ocean.
+ */
+function planb_elementor_tipos($els, &$tipos)
+{
+    if (!is_array($els)) return;
+    foreach ($els as $e) {
+        if (!is_array($e)) continue;
+        if (isset($e['elType']) && $e['elType'] === 'widget' && !empty($e['widgetType'])) { $t = (string)$e['widgetType']; $tipos[$t] = isset($tipos[$t]) ? $tipos[$t] + 1 : 1; }
+        if (!empty($e['elements'])) planb_elementor_tipos($e['elements'], $tipos);
+    }
+}
+function planb_elementor_diag(WP_REST_Request $req)
+{
+    global $wpdb;
+    $r = array('elementor' => defined('ELEMENTOR_VERSION') ? ELEMENTOR_VERSION : null, 'pro' => defined('ELEMENTOR_PRO_VERSION') ? ELEMENTOR_PRO_VERSION : null);
+    $id = (int)$req->get_param('pagina'); if (!$id) $id = (int)get_option('page_on_front');
+    $r['pagina'] = $id;
+    $datos = json_decode((string)get_post_meta($id, '_elementor_data', true), true);
+    $tipos = array(); planb_elementor_tipos($datos, $tipos); $r['bloques_pagina'] = $tipos;
+    $r['registrados_oew'] = array(); $r['faltan'] = array();
+    try {
+        if (class_exists('\\Elementor\\Plugin') && isset(\Elementor\Plugin::$instance->widgets_manager)) {
+            $reg = \Elementor\Plugin::$instance->widgets_manager->get_widget_types();
+            $r['registrados'] = count($reg);
+            foreach (array_keys($reg) as $k) if (strpos($k, 'oew') === 0) $r['registrados_oew'][] = $k;
+            foreach ($tipos as $t => $n) if (!isset($reg[$t])) $r['faltan'][] = $t;
+        }
+    } catch (Exception $e) { $r['error_widgets'] = $e->getMessage(); }
+    $r['clases'] = array('Ocean_Elementor_Widgets' => class_exists('Ocean_Elementor_Widgets'), 'Ocean_Extra' => class_exists('Ocean_Extra'), 'OceanWP_Theme_Class' => class_exists('OceanWP_Theme_Class'), 'WooCommerce' => class_exists('WooCommerce'));
+    $r['plugins_activos'] = array_values((array)get_option('active_plugins'));
+    $r['tema'] = get_option('stylesheet') . ' / ' . get_option('template');
+    $ops = array();
+    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 300) v FROM {$wpdb->options} WHERE option_name LIKE 'oew%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'ocean%' OR option_name LIKE 'elementor\\_experiment%' OR option_name LIKE 'elementor\\_element\\_cache%' OR option_name LIKE 'elementor\\_disabled%' LIMIT 80") as $o) $ops[$o->option_name] = $o->v;
+    $r['opciones'] = $ops;
+    $r['cache_elementos'] = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key='_elementor_element_cache'");
+    $r['cache_portada'] = (bool)get_post_meta($id, '_elementor_element_cache', true);
+    $log = array();
+    foreach (array(WP_CONTENT_DIR . '/debug.log', ini_get('error_log'), ABSPATH . 'error_log') as $f) {
+        if (!$f || !is_file($f) || !is_readable($f)) continue;
+        $fh = @fopen($f, 'rb'); if (!$fh) continue;
+        $tam = filesize($f); fseek($fh, max(0, $tam - 300000)); $txt = (string)fread($fh, 300000); fclose($fh);
+        foreach (array_reverse(explode("\n", $txt)) as $l) { if (stripos($l, 'ocean') !== false || stripos($l, 'elementor') !== false) { $log[] = substr($l, 0, 400); if (count($log) >= 15) break; } }
+    }
+    $r['errores'] = $log;
+    return $r;
+}
+/** 1.7.29 · Borra la caché de elementos de Elementor (lo ya pintado de cada bloque) y sus archivos CSS. */
+function planb_elementor_arreglar(WP_REST_Request $req)
+{
+    global $wpdb;
+    $n = (int)$wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE meta_key IN ('_elementor_element_cache','_elementor_css')");
+    $c = planb_vaciar_caches();
+    return array('borrados' => $n, 'caches' => $c);
+}
 
 /**
  * 1.7.16 · Optimizar la base de datos. Con «mirar» solo cuenta; con «hacer» borra lo que sobra y optimiza las tablas.

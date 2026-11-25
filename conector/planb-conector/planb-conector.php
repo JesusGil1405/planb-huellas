@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.25
+ * Version: 1.7.26
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.25');
+define('PLANB_CONECTOR_VERSION', '1.7.26');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -580,6 +580,17 @@ add_action('init', function () {
 
 /* ───────────── Alta automática en el panel ───────────── */
 register_activation_hook(__FILE__, 'planb_activar');
+// 1.7.26 (auditoría P3.14): al BORRAR el plugin (no al desactivarlo) se quita todo lo suyo: copias, puntos de restauración,
+// su clave y sus ajustes. Así no quedan copias de la web ni secretos olvidados en el servidor.
+register_uninstall_hook(__FILE__, 'planb_desinstalar');
+function planb_desinstalar()
+{
+    global $wpdb;
+    foreach (array(WP_CONTENT_DIR . '/planb-puntos', WP_CONTENT_DIR . '/planb-copias') as $d) if (is_dir($d)) planb_borrar_arbol($d);
+    foreach ((array)glob(WP_CONTENT_DIR . '/planb-paquetes-*', GLOB_ONLYDIR) as $d) planb_borrar_arbol($d);
+    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'planb\\_%' OR option_name LIKE '\\_transient\\_planb\\_%' OR option_name LIKE '\\_transient\\_timeout\\_planb\\_%'");
+    $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}planb_registro");
+}
 function planb_activar()
 {
     if (!get_option('planb_secreto')) update_option('planb_secreto', planb_aleatorio(48), false);
@@ -671,6 +682,10 @@ function planb_autorizado(WP_REST_Request $req)
     if ($sec === '' || $t === '' || $firma === '' || strlen($nonce) < 16 || abs(time() - (int)$t) > 300) return false;
     $esperada = hash_hmac('sha256', $t . '|' . $nonce . '|' . $req->get_method() . '|' . $req->get_route() . '|' . $req->get_body(), $sec);
     if (!hash_equals($esperada, $firma)) return false;
+    // 1.7.26 (auditoría P3.14): la firma no cubre la dirección, así que no se admite NADA en ella aparte de la ruta
+    // (si alguien añadiese parámetros por el camino, podrían colarse en la orden)
+    $q = (array)$req->get_query_params(); unset($q['rest_route']);
+    if ($q) return false;
     // Una firma no se puede usar dos veces
     $k = 'planb_n_' . substr($firma, 0, 32);
     if (get_transient($k)) return false;

@@ -1,0 +1,53 @@
+name: Vigilar el panel
+# Cada 15 minutos mira si el panel responde y si sus tareas automáticas funcionan (publico/salud.php).
+# Si falla 3 veces seguidas, abre un aviso («issue») en este repositorio: GitHub te lo manda por correo.
+# Cuando vuelve a ir bien, lo cierra solo. Se activa con "vigilar_panel": true en huellas-config.json.
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: vigilar
+  cancel-in-progress: false
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Comprobar el panel
+        id: mirar
+        run: |
+          ACTIVO=$(php -r '$c=json_decode(file_get_contents("huellas-config.json"),true); echo !empty($c["vigilar_panel"]) ? "1" : "0";')
+          if [ "$ACTIVO" != "1" ]; then echo "Vigilancia apagada en huellas-config.json"; echo "estado=apagado" >> "$GITHUB_OUTPUT"; exit 0; fi
+          URL=$(php -r '$c=json_decode(file_get_contents("huellas-config.json"),true); echo rtrim($c["panel_url"],"/")."/salud.php";')
+          for i in 1 2 3; do
+            R=$(curl -s -m 30 -w ' HTTP %{http_code}' "$URL" || echo "sin respuesta")
+            echo "Intento $i: $R"
+            if echo "$R" | grep -q 'HTTP 200'; then echo "estado=bien" >> "$GITHUB_OUTPUT"; exit 0; fi
+            sleep 60
+          done
+          echo "estado=mal" >> "$GITHUB_OUTPUT"
+          echo "detalle=$R" >> "$GITHUB_OUTPUT"
+      - name: Avisar o cerrar el aviso
+        if: steps.mirar.outputs.estado != 'apagado'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ESTADO: ${{ steps.mirar.outputs.estado }}
+          DETALLE: ${{ steps.mirar.outputs.detalle }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+        run: |
+          ABIERTO=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "El panel no responde in:title" --json number -q '.[0].number')
+          aviso() { if [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ]; then curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=$1" >/dev/null || true; fi; }
+          if [ "$ESTADO" = "mal" ] && [ -z "$ABIERTO" ]; then
+            CUERPO=$(printf 'Comprobado 3 veces seguidas, con 1 minuto entre cada una. Última respuesta: `%s`\n\n- `base_de_datos: false` o sin respuesta: el panel está caído (mira el hosting).\n- `tareas_5min: false` o `tareas_noche: false`: las tareas programadas no se están ejecutando.\n\nLas webs de los clientes siguen funcionando. Este aviso se cierra solo cuando vuelva a ir bien.' "$DETALLE")
+            gh issue create -R "$GITHUB_REPOSITORY" --title "🚨 El panel no responde o sus tareas no se ejecutan" --body "$CUERPO"
+            aviso "🚨 El panel no responde o sus tareas no se ejecutan. Respuesta: $DETALLE"
+          elif [ "$ESTADO" = "bien" ] && [ -n "$ABIERTO" ]; then
+            gh issue close "$ABIERTO" -R "$GITHUB_REPOSITORY" -c "✅ Vuelve a funcionar ($(date -u +'%d/%m %H:%M') UTC)."
+            aviso "✅ El panel vuelve a funcionar."
+          fi

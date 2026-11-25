@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.31
+ * Version: 1.7.32
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.31');
+define('PLANB_CONECTOR_VERSION', '1.7.32');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -1375,8 +1375,27 @@ function planb_elementor_diag(WP_REST_Request $req)
         }
     }
     $r['oew_codigo'] = $cod;
+    // 1.7.32: todo lo que engancha a Elementor (sin filtrar) y el trozo de código donde Ocean Elementor Widgets decide
+    $todo = array();
+    foreach (array('elementor/widgets/register', 'elementor/init', 'elementor/loaded') as $h) {
+        if (empty($wp_filter[$h])) { $todo[] = $h . ': (nada)'; continue; }
+        foreach ($wp_filter[$h]->callbacks as $prio => $cbs) foreach ($cbs as $cb) {
+            $f = $cb['function']; $n = '?';
+            if (is_string($f)) $n = $f; elseif (is_array($f)) $n = (is_object($f[0]) ? get_class($f[0]) : (string)$f[0]) . '::' . (string)$f[1]; elseif ($f instanceof Closure) $n = 'closure'; elseif (is_object($f)) $n = get_class($f);
+            $todo[] = $h . ' ' . $prio . ' ' . $n;
+        }
+    }
+    $r['enganches_elementor'] = array_slice($todo, 0, 120);
+    $r['acciones_hechas'] = array('elementor/loaded' => did_action('elementor/loaded'), 'elementor/init' => did_action('elementor/init'), 'elementor/widgets/register' => did_action('elementor/widgets/register'), 'plugins_loaded' => did_action('plugins_loaded'));
+    $trozo = array();
+    if (is_file($base . '/includes/plugin.php')) { $ls = file($base . '/includes/plugin.php'); for ($i = 150; $i < min(count($ls), 300); $i++) { $t = rtrim($ls[$i]); if (trim($t) !== '' && strpos(ltrim($t), '*') !== 0 && strpos(ltrim($t), '/') !== 0) $trozo[] = ($i + 1) . ' ' . substr($t, 0, 160); } }
+    $r['oew_plugin_150_300'] = $trozo;
+    $mm = array();
+    foreach ((array)glob($base . '/includes/*manager*.php') as $f) { foreach (file($f) as $i => $l) { $t = rtrim($l); if (trim($t) !== '' && strpos(ltrim($t), '*') !== 0 && strpos(ltrim($t), '/') !== 0) $mm[] = basename($f) . ':' . ($i + 1) . ' ' . substr($t, 0, 160); if (count($mm) >= 150) break 2; } }
+    $r['oew_manager'] = $mm;
+    $r['orden_plugins'] = array_values((array)get_option('active_plugins'));
     $ops2 = array();
-    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 400) v FROM {$wpdb->options} WHERE option_name LIKE '%oew%' OR option_name LIKE '%elementor_widget%' OR option_name LIKE '%licen%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'oceanwp%' LIMIT 60") as $o) $ops2[$o->option_name] = $o->v;
+    foreach ((array)$wpdb->get_results("SELECT option_name, LEFT(option_value, 400) v FROM {$wpdb->options} WHERE option_name LIKE '%oew%' OR option_name LIKE '%elementor_widget%' OR option_name LIKE 'oe\\_%' OR option_name LIKE 'oceanwp%' LIMIT 60") as $o) $ops2[$o->option_name] = $o->v;
     $r['opciones_oew'] = $ops2;
     $th = wp_get_theme();
     $r['tema_nombre'] = $th->get('Name') . ' / plantilla ' . $th->get_template() . ' / ' . $th->get('Version');

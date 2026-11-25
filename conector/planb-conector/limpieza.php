@@ -1,4 +1,13 @@
 <?php
+
+/** unserialize sin crear objetos de clases (una web hackeada puede tener datos preparados para eso). Los objetos se
+ *  quedan como «clase incompleta» y, al volver a guardarlos, conservan su clase original. (1.7.24 · auditoría) */
+if (!function_exists('planb_unserialize_seguro')) {
+    function planb_unserialize_seguro($v)
+    {
+        return version_compare(PHP_VERSION, '7.0', '>=') ? @unserialize($v, array('allowed_classes' => false)) : @unserialize($v); // nosemgrep: unserialize-de-fuera — sin clases desde PHP 7
+    }
+}
 /*
  * Plan B Conector · ESCANEO A FONDO Y LIMPIEZA DE HACKEOS.
  * Escrito compatible con PHP 5.6 a 8.5 (webs antiguas, que son las que más se hackean).
@@ -358,7 +367,7 @@ function planb_escanear(WP_REST_Request $req)
     // 5 · La portada como la ve un visitante y como la ve Google
     foreach (array('visitante' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36', 'google' => 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)') as $k => $ua) {
         if (time() - $inicio > ($por ? 30 : 36)) { $out['portada'][$k] = array('error' => 'sin tiempo (la mira el panel)'); continue; }
-        $r = wp_remote_get(home_url('/'), array('timeout' => 8, 'user-agent' => $ua, 'redirection' => 3, 'sslverify' => false));
+        $r = wp_remote_get(home_url('/'), array('timeout' => 8, 'user-agent' => $ua, 'redirection' => 3, 'sslverify' => false)); // nosemgrep: tls-sin-verificar — la web se mira a sí misma (puede tener certificado propio)
         if (is_wp_error($r)) { $out['portada'][$k] = array('error' => $r->get_error_message()); continue; }
         $html = wp_remote_retrieve_body($r);
         list($n, $npos) = planb_spam_cuenta($html);
@@ -437,7 +446,7 @@ function planb_cambiar_config($cambio)
 function planb_web_arranca()
 {
     foreach (array(home_url('/'), home_url('/?p=' . (int)get_option('page_on_front'))) as $i => $u) {
-        $r = wp_remote_get(add_query_arg('pbcheck', time() . $i, $u), array('timeout' => 20, 'redirection' => 3, 'sslverify' => false, 'headers' => array('Cache-Control' => 'no-cache')));
+        $r = wp_remote_get(add_query_arg('pbcheck', time() . $i, $u), array('timeout' => 20, 'redirection' => 3, 'sslverify' => false, 'headers' => array('Cache-Control' => 'no-cache'))); // nosemgrep: tls-sin-verificar — la web se mira a sí misma
         if (is_wp_error($r)) return false;
         $c = (int)wp_remote_retrieve_response_code($r); $b = (string)wp_remote_retrieve_body($r);
         if ($c >= 500 || stripos($b, 'wp-die-message') !== false || stripos($b, 'error cr') !== false && stripos($b, 'WordPress') !== false && strlen($b) < 20000 || stripos($b, 'Fatal error') !== false) return false;
@@ -486,7 +495,7 @@ function planb_limpiar(WP_REST_Request $req)
             $hecho[] = 'Caché borrada: ' . (isset($x['nombre']) ? $x['nombre'] : $id);
             continue;
         }
-        if (is_serialized($v)) { $u = @unserialize($v); $nuevo = $u === false ? $v : serialize(planb_quitar_spam_valor($u)); }
+        if (is_serialized($v)) { $u = planb_unserialize_seguro($v); $nuevo = $u === false ? $v : serialize(planb_quitar_spam_valor($u)); }
         else $nuevo = planb_quitar_spam($v);
         if ($nuevo === $v && $t === $wpdb->postmeta && !preg_match('/<|\s/', (string)$v)) {
             // 1.7.15 (Jesús, 24/11/2026): restos de las entradas de spam (el nombre de su dirección, que WordPress guarda al
@@ -772,7 +781,7 @@ function planb_tanda(WP_REST_Request $req)
             $vistas++; $cursor = array($t, $col, $id);
             $v = $wpdb->get_var($wpdb->prepare('SELECT `' . $col . '` FROM `' . $t . '` WHERE `' . $pk . '`=%s', $id));
             if ($v === null) continue;
-            if (is_serialized($v)) { $u = @unserialize($v); $nuevo = $u === false ? $v : serialize(planb_arreglar_tildes($u)); }
+            if (is_serialized($v)) { $u = planb_unserialize_seguro($v); $nuevo = $u === false ? $v : serialize(planb_arreglar_tildes($u)); }
             else $nuevo = planb_arreglar_tildes($v);
             if ($nuevo === $v) continue;
             if (count($deshacer) < 5000) $deshacer[] = array($t, $pk, $id, $col, $v);

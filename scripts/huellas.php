@@ -30,7 +30,7 @@ if (preg_match("/define\\('PLANB_CONECTOR_VERSION', '([0-9.]+)'\\)/", $p, $m)) {
     foreach (scandir($dir) as $f) {
         if ($f[0] === '.' || is_dir($dir . '/' . $f)) continue;
         $c = (string)file_get_contents($dir . '/' . $f);
-        if ($f === 'planb-conector.php') $c = normalizar(str_replace(['__PANEL_URL__', '__CLAVE_REGISTRO__', '__TOKEN_ALTA__'], [$cfg['panel_url'], '', ''], $c));
+        if ($f === 'planb-conector.php') $c = normalizar(str_replace(['__PANEL_URL__', '__CLAVE_REGISTRO__', '__TOKEN_ALTA__', '__HUELLAS_URL__'], [$cfg['panel_url'], '', '', $cfg['huellas_url'] ?? 'https://raw.githubusercontent.com/JesusGil1405/planb-huellas/main/huellas.json'], $c));
         $arch[$f] = hash('sha256', $c);
     }
     ksort($arch);

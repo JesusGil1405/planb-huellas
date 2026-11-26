@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.37
+ * Version: 1.7.38
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.37');
+define('PLANB_CONECTOR_VERSION', '1.7.38');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -733,6 +733,7 @@ add_action('rest_api_init', function () {
         'elementor-arreglar' => array('POST', 'planb_elementor_arreglar'),
         'empaquetar-plugin' => array('POST', 'planb_empaquetar_plugin'),
         'oew-arranque' => array('POST', 'planb_oew_arranque'),
+        'mantenimiento' => array('POST', 'planb_mantenimiento'),
         'escudo' => array('POST', 'planb_escudo_ruta'),
         'importar-copia' => array('POST', 'planb_importar_copia'),
         'importacion' => array('GET', 'planb_importacion'),
@@ -743,7 +744,7 @@ add_action('rest_api_init', function () {
         'registro' => array('GET', 'planb_registro'),
     );
     // 1.7.37: los trabajos que cambian la web van de uno en uno (si hay otro en marcha, responde 409 «ocupada» y el panel espera)
-    $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto');
+    $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto', 'mantenimiento');
     foreach ($rutas as $r => $d) {
         $cb = $d[1];
         if (in_array($r, $pesadas, true) && function_exists('planb_rs_ocupar')) {
@@ -1324,6 +1325,65 @@ function planb_oew_arranque(WP_REST_Request $req)
        . "}, -1);\n";
     $ok = @file_put_contents($f, $c) !== false;
     return array('puesto' => $ok);
+}
+
+/**
+ * 1.7.38 · Modo mantenimiento desde el panel (Jesús, 26/11/2026). Página propia («La web está en mantenimiento») para los
+ * visitantes; quien ha entrado en WordPress ve la web normal. Responde 503 con «Retry-After» para que Google no la quite.
+ * No afecta al escritorio, al acceso, a la API ni a las tareas automáticas (solo a las páginas públicas).
+ *   mirar=1          → si está puesto el del panel y qué plugins de mantenimiento hay activos
+ *   poner=1          → lo pone (titulo, texto)
+ *   poner=0          → lo quita; con quitar_plugins=1 también desactiva los plugins de mantenimiento conocidos y el de Elementor
+ */
+function planb_mant_plugins()
+{
+    return array('maintenance/maintenance.php', 'wp-maintenance-mode/wp-maintenance-mode.php', 'coming-soon/coming-soon.php', 'cmp-coming-soon-maintenance/niteo-cmp.php',
+        'under-construction-page/under-construction.php', 'wp-maintenance/wp-maintenance.php', 'maintenance-mode-for-woocommerce/maintenance-mode-for-woocommerce.php',
+        'colorlib-coming-soon-maintenance/colorlib-coming-soon-maintenance.php', 'minimal-coming-soon-maintenance-mode/minimal-coming-soon-maintenance-mode.php', 'site-offline/site-offline.php');
+}
+function planb_mant_estado()
+{
+    if (!function_exists('is_plugin_active')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    $activos = array();
+    foreach (planb_mant_plugins() as $p) if (is_plugin_active($p)) $activos[] = $p;
+    $el = (string)get_option('elementor_maintenance_mode_mode');
+    return array('panel' => is_file(WPMU_PLUGIN_DIR . '/planb-mantenimiento.php'), 'desde' => get_option('planb_mant_desde') ?: null, 'plugins' => $activos, 'elementor' => $el !== '' ? $el : null);
+}
+function planb_mantenimiento(WP_REST_Request $req)
+{
+    $f = WPMU_PLUGIN_DIR . '/planb-mantenimiento.php';
+    if ($req->get_param('mirar')) return planb_mant_estado();
+    if (!$req->get_param('poner')) {
+        $ok = is_file($f) ? @unlink($f) : true;
+        delete_option('planb_mant_desde');
+        $quitados = array();
+        if ($req->get_param('quitar_plugins')) {
+            if (!function_exists('deactivate_plugins')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            foreach (planb_mant_plugins() as $p) if (is_plugin_active($p)) { deactivate_plugins($p, true); if (!is_plugin_active($p)) $quitados[] = $p; }
+            if ((string)get_option('elementor_maintenance_mode_mode') !== '') { update_option('elementor_maintenance_mode_mode', ''); $quitados[] = 'modo mantenimiento de Elementor'; }
+        }
+        if (function_exists('planb_vaciar_caches')) planb_vaciar_caches();
+        return array('quitado' => (bool)$ok, 'desactivados' => $quitados) + planb_mant_estado();
+    }
+    $titulo = substr(wp_strip_all_tags((string)$req->get_param('titulo')), 0, 120);
+    $texto = substr(wp_strip_all_tags((string)$req->get_param('texto')), 0, 400);
+    if ($titulo === '') $titulo = 'La web está en mantenimiento';
+    if ($texto === '') $texto = 'Volvemos en breve. Disculpa las molestias.';
+    if (!is_dir(WPMU_PLUGIN_DIR)) wp_mkdir_p(WPMU_PLUGIN_DIR);
+    $c = "<?php\n/* Plan B: modo mantenimiento puesto desde el panel (lo quita el panel). */\n"
+       . "add_action('template_redirect', function () {\n"
+       . "    if (is_user_logged_in() || is_admin() || (defined('DOING_CRON') && DOING_CRON) || (defined('REST_REQUEST') && REST_REQUEST)) return;\n"
+       . "    \$t = " . var_export(htmlspecialchars($titulo, ENT_QUOTES, 'UTF-8'), true) . "; \$x = " . var_export(htmlspecialchars($texto, ENT_QUOTES, 'UTF-8'), true) . ";\n"
+       . "    status_header(503); header('Retry-After: 3600'); nocache_headers(); header('Content-Type: text/html; charset=utf-8');\n"
+       . "    echo '<!doctype html><!-- planb-mantenimiento --><html lang=\"es\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>' . \$t . '</title>'\n"
+       . "       . '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:#f5f5f4;color:#1c1917;text-align:center;padding:24px}h1{font-size:28px;margin:0 0 12px}p{font-size:17px;color:#57534e;max-width:520px}</style></head>'\n"
+       . "       . '<body><main><h1>' . \$t . '</h1><p>' . \$x . '</p><p style=\"font-size:14px\">' . esc_html(get_bloginfo('name')) . '</p></main></body></html>';\n"
+       . "    exit;\n"
+       . "}, 0);\n";
+    $ok = @file_put_contents($f, $c) !== false;
+    if ($ok) update_option('planb_mant_desde', gmdate('c'), false);
+    if (function_exists('planb_vaciar_caches')) planb_vaciar_caches();
+    return array('puesto' => $ok) + planb_mant_estado();
 }
 
 /**

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.39
+ * Version: 1.7.40
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.39');
+define('PLANB_CONECTOR_VERSION', '1.7.40');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -696,7 +696,30 @@ function planb_autorizado(WP_REST_Request $req)
     $k = 'planb_n_' . substr($firma, 0, 32);
     if (get_transient($k)) return false;
     set_transient($k, 1, 600);
+    planb_wordfence_permitir_panel();
     return true;
+}
+
+/*
+ * 1.7.40 (Jesús, 26/11/2026: Wordfence de filatelia frenaba al panel al probar actualizaciones en la copia):
+ * si la web tiene Wordfence, la IP del panel se añade a sus «IP permitidas». Solo con una llamada firmada por el panel
+ * y solo si esa IP es la del nombre del panel en el DNS (nunca la de un proxy o un CDN, que dejaría pasar a cualquiera).
+ */
+function planb_wordfence_permitir_panel()
+{
+    if (!class_exists('wfConfig') || !method_exists('wfConfig', 'get') || !method_exists('wfConfig', 'set')) return;
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '';
+    if ($ip === '' || get_option('planb_wf_ip') === $ip) return;
+    if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return;
+    $host = (string)parse_url(PLANB_PANEL_URL, PHP_URL_HOST);
+    if ($host === '' || strpos(PLANB_PANEL_URL, '__') === 0) return;
+    $ips = @gethostbynamel($host);
+    if (!$ips || !in_array($ip, $ips, true)) return;
+    try {
+        $lista = array_values(array_filter(array_map('trim', preg_split('/[,\s]+/', (string)wfConfig::get('whitelisted', '')))));
+        if (!in_array($ip, $lista, true)) { $lista[] = $ip; wfConfig::set('whitelisted', implode(',', $lista)); }
+        update_option('planb_wf_ip', $ip, false);
+    } catch (Exception $e) {}
 }
 
 add_action('rest_api_init', function () {

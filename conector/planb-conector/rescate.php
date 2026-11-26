@@ -107,16 +107,26 @@ if ($accion !== '') {
 
 $id = isset($datos['punto']) ? preg_replace('/[^0-9a-z-]/', '', (string)$datos['punto']) : '';
 $dir = $puntos . '/' . $id;
-if ($id === '' || !is_file($dir . '/archivos.zip') || !is_file($dir . '/bd.sql')) rescate_salir(404, array('error' => 'punto no encontrado'));
+if ($id === '' || !is_file($dir . '/archivos.zip') || (!is_file($dir . '/bd.sql') && !is_file($dir . '/bd.sql.php'))) rescate_salir(404, array('error' => 'punto no encontrado'));
 if (!class_exists('ZipArchive')) rescate_salir(500, array('error' => 'sin ZipArchive'));
 
 // 1.7.37: restauración segura (restaurar.php) y un solo trabajo a la vez
 if (!defined('PLANB_RESTAURAR_LIB')) define('PLANB_RESTAURAR_LIB', 1);
 if (!is_file(__DIR__ . '/restaurar.php')) rescate_salir(500, array('error' => 'falta restaurar.php'));
 require_once __DIR__ . '/restaurar.php';
+if (is_file(__DIR__ . '/seguro.php')) require_once __DIR__ . '/seguro.php'; // 1.7.39
 if (!planb_rs_ocupar($puntos, 'rescate')) {
     $o = planb_rs_ocupado_info($puntos);
     rescate_salir(409, array('error' => 'ocupada', 'que' => $o ? $o['que'] : '?', 'desde' => $o ? $o['desde'] : 0));
+}
+// 1.7.39: el punto tiene que estar completo y, si tiene huellas, coincidir (nadie lo ha cambiado)
+$sinHuella = true; $sqlf = $dir . '/bd.sql';
+if (function_exists('planb_punto_completo')) {
+    if (!planb_punto_completo($dir)) rescate_salir(404, array('error' => 'punto a medias'));
+    $sqlf = planb_punto_sql($dir); $info = planb_punto_info($dir);
+    $sinHuella = !is_array($info) || empty($info['huellas']['bd']) || empty($info['huellas']['zip']);
+    if (!$sinHuella && (!hash_equals((string)$info['huellas']['bd'], (string)hash_file('sha256', $sqlf)) || !hash_equals((string)$info['huellas']['zip'], (string)hash_file('sha256', $dir . '/archivos.zip'))))
+        rescate_salir(409, array('error' => 'punto_cambiado'));
 }
 // Primero se extrae el zip aparte: si falla, no se ha tocado nada
 $prep = planb_rs_preparar($dir);
@@ -134,19 +144,29 @@ if (strpos($host, ':') !== false) { list($host, $extra) = explode(':', $host, 2)
 $db = @new mysqli($host, $c['DB_USER'], $c['DB_PASSWORD'], $c['DB_NAME'], $puerto ? $puerto : 3306, $sock);
 if ($db->connect_errno) { planb_rs_borrar($prep['tmp']); rescate_salir(500, array('error' => 'base de datos: ' . $db->connect_error)); }
 $db->set_charset('utf8mb4');
-$h = fopen($dir . '/bd.sql', 'r');
-$buf = ''; $errores = 0; $hechas = 0;
-while (($l = fgets($h)) !== false) {
-    $buf .= $l;
-    if (substr(rtrim($l), -1) === ';') {
-        $s = str_replace(array('\\\\', "\\'"), '', $buf);
-        if (substr_count($s, "'") % 2 === 0) { $buf = preg_replace('/\{[0-9a-f]{64}\}/', '%', $buf); if (!$db->query($buf)) $errores++; else $hechas++; $buf = ''; }
+// Prefijo de las tablas de esta web (de wp-config.php)
+$pre = preg_match('/\$table_prefix\s*=\s*[\'"]([A-Za-z0-9_]*)[\'"]/', $cfg, $mp) ? $mp[1] : 'wp_';
+$todas = array(); if ($rt = $db->query('SHOW TABLES')) { while ($f = $rt->fetch_row()) $todas[] = $f[0]; }
+if (function_exists('planb_sql_ejecutar')) {
+    $otros = planb_otros_prefijos($todas, $pre);
+    $rs = planb_sql_ejecutar($sqlf, function ($q) use ($db) { return (bool)$db->query($q); }, function ($q) use ($pre, $otros) { return planb_sql_sentencia_permitida($q, $pre, $otros); });
+} else {
+    $rs = array('errores' => 0, 'hechas' => 0, 'bloqueadas' => 0, 'incompleta' => false);
+    $h = fopen($sqlf, 'r'); $buf = '';
+    while (($l = fgets($h)) !== false) {
+        $buf .= $l;
+        if (substr(rtrim($l), -1) === ';') {
+            $s = str_replace(array('\\\\', "\\'"), '', $buf);
+            if (substr_count($s, "'") % 2 === 0) { $buf = preg_replace('/\{[0-9a-f]{64}\}/', '%', $buf); if (!$db->query($buf)) $rs['errores']++; else $rs['hechas']++; $buf = ''; }
+        }
     }
+    fclose($h);
 }
-fclose($h);
+$errores = $rs['errores']; $hechas = $rs['hechas'];
 $db->close();
 
 /* 2) Archivos: cada plugin y tema se cambia por el del punto (los actuales van a una papelera) y el resto encima */
 $cambio = planb_rs_cambiar($dir, $prep['tmp'], $raiz, $contenido);
 if (function_exists('opcache_reset')) @opcache_reset();
-rescate_salir(200, array('restaurado' => !empty($cambio['ok']), 'errores_sql' => $errores, 'sentencias' => $hechas, 'problemas' => $cambio['problemas'], 'seguro' => 1));
+rescate_salir(200, array('restaurado' => !empty($cambio['ok']), 'errores_sql' => $errores, 'sentencias' => $hechas, 'bloqueadas' => $rs['bloqueadas'], 'incompleta' => $rs['incompleta'],
+    'quitados' => isset($prep['quitados']) ? $prep['quitados'] : array(), 'sin_huella' => $sinHuella, 'problemas' => $cambio['problemas'], 'seguro' => 2));

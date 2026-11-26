@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.38
+ * Version: 1.7.39
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,12 +11,14 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.38');
+define('PLANB_CONECTOR_VERSION', '1.7.39');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
 // una web ya conectada se identifica con su propio secreto (y, si lo cambia, firmando con el anterior).
 if (!defined('PLANB_TOKEN_ALTA')) define('PLANB_TOKEN_ALTA', '__TOKEN_ALTA__');
+// 1.7.39: comprobaciones de seguridad (auditoría del 26/11/2026). Antes que todo lo demás.
+if (is_file(dirname(__FILE__) . '/seguro.php')) require_once dirname(__FILE__) . '/seguro.php';
 if (is_file(dirname(__FILE__) . '/limpieza.php')) require_once dirname(__FILE__) . '/limpieza.php';
 // 1.7.37: restauración segura y candado de trabajos (compartido con rescate.php)
 if (!defined('PLANB_RESTAURAR_LIB')) define('PLANB_RESTAURAR_LIB', 1);
@@ -145,7 +147,7 @@ function planb_buscar_reemplazar($de, $a)
 {
     global $wpdb;
     $n = 0;
-    foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%')) as $t) {
+    foreach (planb_tablas_propias() as $t) { // 1.7.39: sin las de otra web de la misma base
         $cols = $wpdb->get_results("SHOW COLUMNS FROM `$t`", ARRAY_A);
         $pk = array(); $txt = array();
         foreach ($cols as $c) {
@@ -212,7 +214,8 @@ function planb_importar_copia(WP_REST_Request $req)
     fclose($h);
     if ($viejoPref === null) { @unlink($sqlf); $zip->close(); @unlink($zipf); planb_imp_estado('error', array('error' => 'no encuentro las tablas de WordPress en la copia')); return new WP_Error('planb', 'Copia sin tablas de WordPress', array('status' => 500)); }
     $pref = $wpdb->prefix;
-    foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($pref) . '%')) as $t) $wpdb->query("DROP TABLE IF EXISTS `$t`");
+    if ($pref === '') { $zip->close(); @unlink($sqlf); @unlink($zipf); planb_imp_estado('error', array('error' => 'prefijo vacío')); return new WP_Error('planb', 'Prefijo vacío: no se borra nada', array('status' => 409)); }
+    foreach (planb_tablas_propias($pref) as $t) $wpdb->query("DROP TABLE IF EXISTS `$t`"); // 1.7.39: solo las de esta web
     $h = fopen($sqlf, 'r'); $buf = ''; $err = 0;
     $wpdb->query('SET foreign_key_checks=0');
     while (($l = fgets($h)) !== false) {
@@ -971,6 +974,7 @@ function planb_estado(WP_REST_Request $req)
         'plugins' => $plugins,
         'temas' => $temas,
         'puntos' => planb_lista_puntos(),
+        'puntos_incompletos' => planb_lista_puntos(true), // 1.7.39
         'rescate' => plugins_url('rescate.php', __FILE__),
         'ruta' => ABSPATH,
         'seguridad' => planb_seguridad(),
@@ -1040,14 +1044,17 @@ function planb_dir_puntos()
     }
     return $d;
 }
-function planb_lista_puntos()
+function planb_lista_puntos($incompletos = false)
 {
+    // 1.7.39: solo los puntos completos (con base de datos y archivos); los demás, aparte (auditoría S46)
     $d = WP_CONTENT_DIR . '/planb-puntos';
-    $o = array();
+    $o = array(); $mal = array();
     if (is_dir($d)) foreach (glob($d . '/*', GLOB_ONLYDIR) as $p) {
-        $o[] = array('id' => basename($p), 'mb' => round(planb_tam_dir($p) / 1048576, 1));
+        if (!preg_match('/^\d{8}-\d{6}-/', basename($p))) continue;
+        if (planb_punto_completo($p)) $o[] = array('id' => basename($p), 'mb' => round(planb_tam_dir($p) / 1048576, 1));
+        else $mal[] = basename($p);
     }
-    return $o;
+    return $incompletos ? $mal : $o;
 }
 function planb_tam_dir($d)
 {
@@ -1083,6 +1090,17 @@ function planb_crear_punto(WP_REST_Request $req)
     global $wpdb;
     $base = planb_dir_puntos();
     planb_guardar_clave();
+    // 1.7.39 (auditoría S40): qué puntos viejos se podrán borrar, sin tocar el respaldo de otro trabajo en curso
+    // (los que el panel pide conservar) ni los de menos de 6 horas. Si no cabe, no se crea: 409 y el panel lo reintenta.
+    $conservar = array();
+    foreach ((array)$req->get_param('conservar') as $c) if (is_string($c) && preg_match('/^\d{8}-\d{6}-[a-z0-9]{8,64}$/', $c)) $conservar[] = $c;
+    $existentes = array();
+    foreach ((array)glob($base . '/*', GLOB_ONLYDIR) as $p) if (preg_match('/^\d{8}-\d{6}-/', basename($p))) {
+        if (!planb_punto_completo($p) && filemtime($p) < time() - 3600) { planb_borrar_arbol($p); continue; } // a medias y viejo: no sirve
+        $existentes[] = basename($p);
+    }
+    $plan = planb_puntos_a_borrar($existentes, $conservar, time());
+    if ($plan === 'lleno') return new WP_Error('ocupado', 'Hay otro trabajo con su punto de restauración en marcha', array('status' => 409));
     $id = date('Ymd-His') . '-' . planb_aleatorio(32); // 32 caracteres al azar: imposible de adivinar aunque el servidor no respete el .htaccess
     $dir = $base . '/' . $id;
     wp_mkdir_p($dir);
@@ -1107,15 +1125,15 @@ function planb_crear_punto(WP_REST_Request $req)
     $zc = new ZipArchive();
     if ($zc->open($dir . '/archivos.zip') !== true || $zc->numFiles < 10) return $mal('El zip no se puede leer después de crearlo');
     $zc->close();
-    // Base de datos (solo las tablas de esta web)
-    $sqlf = $dir . '/bd.sql';
-    $h = @fopen($sqlf, 'w');
+    // Base de datos (solo las tablas de esta web, sin las de otra web de la misma base). 1.7.39: como .php que no enseña nada
+    $sqlf = $dir . '/bd.sql.php';
+    $h = planb_sql_abrir_escritura($sqlf);
     if (!$h) return $mal('No se pudo crear la copia de la base de datos');
     $esc = fwrite($h, "SET NAMES utf8mb4;\nSET foreign_key_checks=0;\n") ? 0 : 1;
-    $tablas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
+    $tablas = planb_tablas_propias();
     foreach ($tablas as $t) {
         $crea = $wpdb->get_row("SHOW CREATE TABLE `$t`", ARRAY_N);
-        if (!$crea) continue; // vistas u otras cosas raras
+        if (!$crea || stripos((string)$crea[1], 'CREATE TABLE') !== 0) continue; // vistas u otras cosas raras
         if (fwrite($h, "DROP TABLE IF EXISTS `$t`;\n" . $crea[1] . ";\n") === false) $esc++;
         $off = 0;
         do {
@@ -1134,20 +1152,19 @@ function planb_crear_punto(WP_REST_Request $req)
     clearstatcache();
     $bytesSql = (int)@filesize($sqlf);
     if ($bytesSql < 200 || !$tablas) return $mal('La copia de la base de datos ha salido vacía');
-    file_put_contents($dir . '/info.json', json_encode(array('wp' => $GLOBALS['wp_version'], 'php' => PHP_VERSION, 'tablas' => $tablas, 'archivos' => $n, 'bytes_zip' => $bytesZip, 'bytes_sql' => $bytesSql)));
-    // 1.7.37: los puntos viejos se borran DESPUÉS de crear bien el nuevo. Se guardan los 2 últimos además del nuevo;
-    // los de menos de 24 h solo se borran si hay más de 4 (para no llenar el disco).
-    $puntos = glob($base . '/*', GLOB_ONLYDIR);
-    $puntos = array_values(array_filter((array)$puntos, function ($p) use ($dir) { return $p !== $dir && preg_match('/^\d{8}-\d{6}-/', basename($p)); }));
-    sort($puntos);
-    while (count($puntos) > 2) {
-        $viejo = $puntos[0];
-        $hora = DateTime::createFromFormat('Ymd-His', substr(basename($viejo), 0, 15));
-        $reciente = $hora && $hora->getTimestamp() > time() - 86400;
-        if ($reciente && count($puntos) <= 3) break;
-        planb_borrar_arbol(array_shift($puntos));
-    }
-    return array('punto' => $id, 'archivos' => $n, 'tablas' => count($tablas), 'mb' => round(planb_tam_dir($dir) / 1048576, 1), 'bytes_zip' => $bytesZip, 'bytes_sql' => $bytesSql);
+    // Huellas para comprobar al restaurar que nadie ha cambiado el punto; «completo» es lo último que se escribe
+    $info = array('wp' => $GLOBALS['wp_version'], 'php' => PHP_VERSION, 'tablas' => $tablas, 'archivos' => $n, 'bytes_zip' => $bytesZip, 'bytes_sql' => $bytesSql,
+        'huellas' => array('bd' => hash_file('sha256', $sqlf), 'zip' => hash_file('sha256', $dir . '/archivos.zip')), 'completo' => 1);
+    if (!planb_archivo_php_escribir($dir . '/info.php', json_encode($info))) return $mal('No se pudo guardar la información del punto');
+    // Ahora sí: los viejos que se pueden borrar
+    $borrados = array();
+    if (is_array($plan)) foreach ($plan as $b) { planb_borrar_arbol($base . '/' . $b); $borrados[] = $b; }
+    $r = array('punto' => $id, 'archivos' => $n, 'tablas' => count($tablas), 'mb' => round(planb_tam_dir($dir) / 1048576, 1), 'bytes_zip' => $bytesZip, 'bytes_sql' => $bytesSql, 'borrados' => $borrados);
+    // ¿Se puede descargar el zip desde fuera? (nginx no hace caso del .htaccess). Solo se avisa: el nombre es aleatorio.
+    // nosemgrep: tls-sin-verificar — la web se pide a sí misma solo para ver el código (200 o no), sin mandar ni leer datos; con un certificado mal puesto también hay que avisar
+    $pub = wp_remote_head(content_url('planb-puntos/' . $id . '/archivos.zip'), array('timeout' => 8, 'redirection' => 0, 'sslverify' => false));
+    if (!is_wp_error($pub) && (int)wp_remote_retrieve_response_code($pub) === 200) $r['expuesto'] = true;
+    return $r;
 }
 
 function planb_restaurar(WP_REST_Request $req)
@@ -1157,28 +1174,26 @@ function planb_restaurar(WP_REST_Request $req)
     global $wpdb;
     $id = preg_replace('/[^0-9a-z-]/', '', (string)$req->get_param('punto'));
     $dir = WP_CONTENT_DIR . '/planb-puntos/' . $id;
-    if (!$id || !is_file($dir . '/archivos.zip') || !is_file($dir . '/bd.sql')) return new WP_Error('no_punto', 'Punto de restauración no encontrado', array('status' => 404));
-    // 1.7.37: primero se extrae el zip aparte. Si falla, no se ha tocado nada (ni la base de datos ni los archivos).
+    if (!$id || !planb_punto_completo($dir)) return new WP_Error('no_punto', 'Punto de restauración no encontrado o a medias', array('status' => 404));
+    // 1.7.39: si el punto tiene huellas, tienen que coincidir (nadie lo ha cambiado desde que se hizo)
+    $info = planb_punto_info($dir);
+    $sqlf = planb_punto_sql($dir);
+    $sinHuella = !is_array($info) || empty($info['huellas']['bd']) || empty($info['huellas']['zip']);
+    if (!$sinHuella && (!hash_equals((string)$info['huellas']['bd'], (string)hash_file('sha256', $sqlf)) || !hash_equals((string)$info['huellas']['zip'], (string)hash_file('sha256', $dir . '/archivos.zip'))))
+        return new WP_Error('punto_cambiado', 'El punto de restauración ha cambiado: no se restaura', array('status' => 409));
+    // 1.7.37: primero se extrae el zip aparte (sin .php en uploads). Si falla, no se ha tocado nada.
     $prep = planb_rs_preparar($dir);
     if (empty($prep['ok'])) return new WP_Error('zip', 'No se restaura: ' . $prep['error'], array('status' => 500));
-    // 1) Base de datos
-    $h = fopen($dir . '/bd.sql', 'r');
-    $buf = ''; $err = 0; $hechas = 0;
-    while (($l = fgets($h)) !== false) {
-        $buf .= $l;
-        if (substr(rtrim($l), -1) === ';' && planb_sentencia_completa($buf)) {
-            // Puntos hechos antes de la 1.7.4: el «%» quedó guardado como {hash de 64}; se devuelve a «%»
-            $buf = preg_replace('/\{[0-9a-f]{64}\}/', '%', $buf);
-            if ($wpdb->query($buf) === false) $err++; else $hechas++;
-            $buf = '';
-        }
-    }
-    fclose($h);
+    // 1) Base de datos: solo sentencias de esta web (ni otras bases, ni usuarios, ni tablas de otra web de la misma base)
+    $todas = (array)$wpdb->get_col('SHOW TABLES');
+    $pre = $wpdb->prefix; $otros = planb_otros_prefijos($todas, $pre);
+    $rs = planb_sql_ejecutar($sqlf, function ($q) use ($wpdb) { return $wpdb->query($q) !== false; }, function ($q) use ($pre, $otros) { return planb_sql_sentencia_permitida($q, $pre, $otros); });
     // 2) Archivos: se cambia cada plugin y tema por el del punto (los actuales van a una papelera, no se borran) y el resto encima
     $cambio = planb_rs_cambiar($dir, $prep['tmp'], rtrim(ABSPATH, '/'), rtrim(WP_CONTENT_DIR, '/'));
     wp_cache_flush();
     if (function_exists('opcache_reset')) @opcache_reset();
-    return array('restaurado' => !empty($cambio['ok']), 'errores_sql' => $err, 'sentencias' => $hechas, 'problemas' => $cambio['problemas'], 'seguro' => 1);
+    return array('restaurado' => !empty($cambio['ok']), 'errores_sql' => $rs['errores'], 'sentencias' => $rs['hechas'], 'bloqueadas' => $rs['bloqueadas'], 'incompleta' => $rs['incompleta'],
+        'quitados' => isset($prep['quitados']) ? $prep['quitados'] : array(), 'sin_huella' => $sinHuella, 'problemas' => $cambio['problemas'], 'seguro' => 2);
 }
 function planb_sentencia_completa($s)
 {
@@ -1392,7 +1407,8 @@ function planb_mantenimiento(WP_REST_Request $req)
  */
 function planb_empaquetar_plugin(WP_REST_Request $req)
 {
-    $slug = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)$req->get_param('slug'));
+    if (!planb_slug_ok((string)$req->get_param('slug'))) return new WP_Error('slug', 'Nombre no válido', array('status' => 400)); // 1.7.39
+    $slug = (string)$req->get_param('slug');
     $dir = WP_PLUGIN_DIR . '/' . $slug;
     if ($slug === '' || $slug === 'planb-conector' || !is_dir($dir)) return new WP_Error('no', 'Esta web no tiene ese plugin', array('status' => 404));
     if (!class_exists('ZipArchive')) return new WP_Error('zip', 'El servidor no tiene ZipArchive', array('status' => 500));
@@ -1577,7 +1593,7 @@ function planb_optimizar_bd(WP_REST_Request $req)
     if (function_exists('delete_expired_transients')) delete_expired_transients(true);
     $wpdb->query("DELETE m FROM $pm m LEFT JOIN $p x ON x.ID=m.post_id WHERE x.ID IS NULL");
     $wpdb->query("DELETE m FROM $cm m LEFT JOIN $c x ON x.comment_ID=m.comment_id WHERE x.comment_ID IS NULL");
-    foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%')) as $t) $wpdb->query('OPTIMIZE TABLE `' . esc_sql($t) . '`');
+    foreach (planb_tablas_propias() as $t) $wpdb->query('OPTIMIZE TABLE `' . esc_sql($t) . '`');
     wp_cache_flush();
     return array('cuentas' => $cuentas, 'tamano_antes' => $antes, 'tamano_despues' => $tam());
 }
@@ -1617,10 +1633,11 @@ function planb_quitar_plugin(WP_REST_Request $req)
 /* ───────────── Borrar un tema que no se usa. Nunca el activo ni su tema padre. ───────────── */
 function planb_quitar_tema(WP_REST_Request $req)
 {
+    if (!planb_slug_ok((string)$req->get_param('slug'))) return new WP_Error('slug', 'Nombre no válido', array('status' => 400)); // 1.7.39
     planb_silencio_empezar();
     planb_cargar_admin();
     require_once ABSPATH . 'wp-admin/includes/theme.php';
-    $slug = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)$req->get_param('slug'));
+    $slug = (string)$req->get_param('slug');
     $t = $slug !== '' ? wp_get_theme($slug) : null;
     if (!$t || !$t->exists()) { planb_silencio_terminar(); return new WP_Error('no_instalado', 'Esta web no tiene ese tema', array('status' => 409)); }
     if ($slug === get_stylesheet() || $slug === get_template()) { planb_silencio_terminar(); return new WP_Error('en_uso', 'Ese tema está en uso: no se borra', array('status' => 409)); }
@@ -1646,10 +1663,11 @@ function planb_instalar_zip_real(WP_REST_Request $req)
     planb_cargar_admin();
     $url = esc_url_raw((string)$req->get_param('url'));
     $sha = strtolower((string)$req->get_param('sha256'));
-    $slug = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)$req->get_param('slug'));
+    if (!planb_slug_ok((string)$req->get_param('slug'))) return new WP_Error('slug', 'Nombre no válido', array('status' => 400)); // 1.7.39
+    $slug = (string)$req->get_param('slug');
     $tipo = $req->get_param('tipo') === 'tema' ? 'tema' : 'plugin';
     // Solo se descargan paquetes del propio panel
-    if (!$url || !$slug || strlen($sha) !== 64 || !planb_host_del_panel((string)parse_url($url, PHP_URL_HOST))) {
+    if (!$url || !$slug || strlen($sha) !== 64 || !planb_misma_base($url, PLANB_PANEL_URL)) {
         return new WP_Error('param', 'Paquete no válido', array('status' => 400));
     }
     $antes = null; $archivo = null; $activo = false;
@@ -1716,7 +1734,8 @@ function planb_licencia(WP_REST_Request $req)
 {
     planb_silencio_empezar();
     planb_cargar_admin();
-    $slug = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)$req->get_param('slug'));
+    if (!planb_slug_ok((string)$req->get_param('slug'))) return new WP_Error('slug', 'Nombre no válido', array('status' => 400)); // 1.7.39
+    $slug = (string)$req->get_param('slug');
     $clave = trim((string)$req->get_param('clave'));
     $usuario = trim((string)$req->get_param('usuario'));
     $r = array('resultado' => 'manual', 'detalle' => 'Este plugin no se puede activar desde fuera: pega la licencia en su pantalla de ajustes.');
@@ -1806,8 +1825,8 @@ function planb_clonar(WP_REST_Request $req)
     // dirección y, al borrar el clon, la web real se quedaba sin imágenes de fondo (vallaure.es, 20/11/2026).
     if (is_dir($raiz . '/wp-content/uploads')) planb_clon_subidas($raiz . '/wp-content/uploads', $destino . '/wp-content/uploads');
     // Tablas con otro prefijo
-    $tablas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
-    foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($prefijo) . '%')) as $vieja) $wpdb->query("DROP TABLE `$vieja`");
+    $tablas = planb_tablas_propias();
+    foreach (planb_tablas_propias($prefijo) as $vieja) $wpdb->query("DROP TABLE `$vieja`");
     foreach ($tablas as $t) {
         $n = $prefijo . substr($t, strlen($wpdb->prefix));
         $suf = substr($t, strlen($wpdb->prefix)); // nombre de la tabla sin el prefijo
@@ -1955,7 +1974,7 @@ function planb_borrar_clon(WP_REST_Request $req)
     $destino = ($req->get_param('dentro') ? rtrim(ABSPATH, '/') : dirname(rtrim(ABSPATH, '/'))) . '/' . $carpeta;
     if (is_link($destino . '/wp-content/uploads')) @unlink($destino . '/wp-content/uploads');
     planb_borrar_arbol($destino);
-    foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($prefijo) . '%')) as $t) $wpdb->query("DROP TABLE `$t`");
+    foreach (planb_tablas_propias($prefijo) as $t) $wpdb->query("DROP TABLE `$t`");
     planb_borrar_paquetes_dir();
     return array('ok' => true, 'css_reparado' => planb_reparar_css_clon());
 }
@@ -2102,7 +2121,7 @@ function planb_volcar_bd($sqlf)
     global $wpdb;
     $h = fopen($sqlf, 'w');
     fwrite($h, "SET NAMES utf8mb4;\nSET foreign_key_checks=0;\n");
-    $tablas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
+    $tablas = planb_tablas_propias();
     foreach ($tablas as $t) {
         $crea = $wpdb->get_row("SHOW CREATE TABLE `$t`", ARRAY_N);
         fwrite($h, "DROP TABLE IF EXISTS `$t`;\n" . $crea[1] . ";\n");

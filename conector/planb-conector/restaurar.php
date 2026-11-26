@@ -54,15 +54,19 @@ function planb_rs_preparar($dirPunto)
     $n = $zip->numFiles;
     if ($n < 10) { $zip->close(); return array('ok' => false, 'error' => 'el zip del punto está vacío (' . $n . ' entradas)'); }
     // Nada fuera de la carpeta: ni rutas absolutas ni «..»
+    $permitidas = array(); $quitados = array();
     for ($i = 0; $i < $n; $i++) {
         $nom = (string)$zip->getNameIndex($i);
         if ($nom === '' || $nom[0] === '/' || preg_match('#(^|/)\.\.(/|$)#', $nom) || strpos($nom, '\\') !== false) { $zip->close(); return array('ok' => false, 'error' => 'el zip trae rutas no válidas'); }
+        // 1.7.39 (auditoría S46): ningún ejecutable dentro de uploads
+        if (function_exists('planb_zip_entrada_permitida') && !planb_zip_entrada_permitida($nom)) { $quitados[] = $nom; continue; }
+        $permitidas[] = $nom;
     }
     @mkdir($tmp, 0755, true);
-    $ok = $zip->extractTo($tmp);
+    $ok = $quitados ? $zip->extractTo($tmp, $permitidas) : $zip->extractTo($tmp);
     $zip->close();
     if (!$ok) { planb_rs_borrar($tmp); return array('ok' => false, 'error' => 'no se pudo extraer el zip (¿falta espacio?). La web no se ha tocado'); }
-    return array('ok' => true, 'tmp' => $tmp, 'entradas' => $n);
+    return array('ok' => true, 'tmp' => $tmp, 'entradas' => $n, 'quitados' => array_slice($quitados, 0, 50));
 }
 
 /**

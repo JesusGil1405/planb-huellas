@@ -39,6 +39,12 @@ function planb_spam_debil()
     return '/(poker|gambl|apuestas|slot[s]?\b|bet(ting|s)?\b|bonus(es)?\b|wager|jackpot|free ?spins?|payday|loan[s]? online|aviator|pin-?up|scommess|wetten|ruleta|roulette|replica watch)/iu';
 }
 
+/** 1.7.39 (auditoría S47): ¿una imagen es de spam por su título o nombre? Solo con spam FUERTE (no «bet», «slot», «bonus»). */
+function planb_adjunto_es_spam($titulo, $nombre)
+{
+    return (bool)preg_match(planb_spam_fuerte(), (string)$titulo . ' ' . (string)$nombre);
+}
+
 /** Combinado (para el limpiador, que solo actúa sobre enlaces externos ya filtrados por dominio). */
 function planb_spam_regex()
 {
@@ -277,7 +283,7 @@ function planb_escanear(WP_REST_Request $req)
     // 3 · Base de datos: todas las tablas, columnas de texto
     $rx = planb_spam_regex();
     $terminos = array('xrv-', 'casino', 'mostbet', '1win', 'vavada', 'pinco', 'free spin', 'viagra', 'cialis', 'казино', 'eval(', 'base64_decode', 'document.write(unescape', 'String.fromCharCode');
-    $tablas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
+    $tablas = planb_tablas_propias();
     // Entradas y páginas de spam creadas por el hackeo (título o dirección de casino): van a la papelera de WordPress
     $out['entradas'] = array();
     $likeT = array();
@@ -491,7 +497,7 @@ function planb_limpiar(WP_REST_Request $req)
     }
 
     // 2 · Base de datos: se quita solo el spam y se guarda el valor anterior
-    $permitidas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
+    $permitidas = planb_tablas_propias();
     foreach ((array)(isset($p['bd']) ? $p['bd'] : array()) as $x) {
         $t = (string)$x['tabla']; $pk = (string)$x['pk']; $col = (string)$x['columna']; $id = (string)$x['id'];
         if (!in_array($t, $permitidas, true) || !preg_match('/^\w+$/', $pk) || !preg_match('/^\w+$/', $col)) continue;
@@ -514,7 +520,7 @@ function planb_limpiar(WP_REST_Request $req)
             $fm = $wpdb->get_row($wpdb->prepare('SELECT * FROM `' . $t . '` WHERE meta_id=%d', $id), ARRAY_A);
             $post = $fm ? get_post((int)$fm['post_id']) : null;
             $resto = $fm && (in_array($fm['meta_key'], array('_wp_desired_post_slug', '_wp_old_slug', '_wp_trash_meta_status', '_wp_trash_meta_time'), true)
-                || !$post || $post->post_status === 'trash' || ($post->post_type === 'attachment' && preg_match(planb_spam_regex(), $post->post_title . ' ' . $post->post_name)));
+                || !$post || $post->post_status === 'trash' || ($post->post_type === 'attachment' && planb_adjunto_es_spam($post->post_title, $post->post_name))); // 1.7.39: solo spam fuerte (no «alphabet» ni «Elisabet»)
             if ($resto) {
                 $deshacer['bd'][] = array($t, 'meta_id', $id, 'meta_value', $v, 'filameta', $fm);
                 $wpdb->delete($t, array('meta_id' => (int)$id));
@@ -739,7 +745,7 @@ function planb_filas_tildes($max, $desde = null, $tope = 0)
     // $tope: segundos máximos buscando (0 = sin tope)
     global $wpdb;
     $o = array(); $t0 = microtime(true); $pasado = $desde === null;
-    $tablas = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%'));
+    $tablas = planb_tablas_propias();
     sort($tablas);
     foreach ($tablas as $t) {
         if (preg_match('/(_events|_log|_logs|_audit|_activity|_stats|_visits?|_404|wfhits|wflogs|_sessions|actionscheduler)/i', substr($t, strlen($wpdb->prefix)))) continue;
@@ -808,7 +814,7 @@ function planb_tanda(WP_REST_Request $req)
     if ($que === 'porcentajes') {
         // Reparación: datos restaurados de un punto antiguo con el «%» guardado como {hash de 64} (rompe textos y datos serializados)
         $quedan = 0;
-        foreach ($wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%')) as $t) {
+        foreach (planb_tablas_propias() as $t) {
             $pk = null; $txt = array();
             foreach ($wpdb->get_results('SHOW COLUMNS FROM `' . esc_sql($t) . '`', ARRAY_A) as $c) { if ($c['Key'] === 'PRI' && $pk === null) $pk = $c['Field']; if (preg_match('/text|char/i', $c['Type'])) $txt[] = $c['Field']; }
             if (!$pk) continue;
@@ -827,19 +833,27 @@ function planb_tanda(WP_REST_Request $req)
     }
     if ($que === 'adjuntos') {
         // Imágenes del spam: colgaban de entradas que están en la papelera, o tienen nombre de casino; nunca las que usa una página
-        $rx = planb_spam_regex();
-        $ids = $wpdb->get_col("SELECT a.ID FROM {$wpdb->posts} a LEFT JOIN {$wpdb->posts} p ON p.ID=a.post_parent WHERE a.post_type='attachment' AND ((p.ID IS NOT NULL AND p.post_type='post' AND p.post_status='trash') OR a.post_title REGEXP 'casino|kasyn|bet|slot|bonus|roulette|poker|aviator|pin-?up' OR a.guid REGEXP 'casino|kasyn|slot|bonus|roulette|poker|aviator|pin-?up') LIMIT 400");
+        // 1.7.39 (auditoría S47): por el nombre, solo spam FUERTE (casino, marcas de apuestas…); «bet», «slot» o «bonus»
+        // salen en nombres buenos (alphabet, Elisabet, Betanzos). Y «usada» también si sale en ajustes de Elementor, galerías…
+        $ids = $wpdb->get_col("SELECT a.ID FROM {$wpdb->posts} a LEFT JOIN {$wpdb->posts} p ON p.ID=a.post_parent WHERE a.post_type='attachment' AND ((p.ID IS NOT NULL AND p.post_type='post' AND p.post_status='trash') OR a.post_title REGEXP 'casino|kasyn|kazino|betway|bet365|1xbet|melbet|mostbet|vavada|parimatch|leovegas|joycasino' OR a.guid REGEXP 'casino|kasyn|kazino|betway|bet365|1xbet|melbet|mostbet|vavada|parimatch|leovegas|joycasino') LIMIT 400");
         $saltadas = 0;
         foreach ($ids as $id) {
             if (microtime(true) - $t0 > 15) break;
+            $ap = get_post((int)$id);
+            $padre = $ap && $ap->post_parent ? get_post((int)$ap->post_parent) : null;
+            if (!($padre && $padre->post_status === 'trash' && $padre->post_type === 'post') && !($ap && planb_adjunto_es_spam($ap->post_title, $ap->post_name))) { $saltadas++; update_post_meta((int)$id, '_planb_no_tocar', 1); continue; }
             $f = (string)get_post_meta((int)$id, '_wp_attached_file', true);
             $base = $f !== '' ? pathinfo($f, PATHINFO_FILENAME) : '';
             $usada = $base !== '' && (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status IN ('publish','private','draft','future') AND post_type NOT IN ('post','attachment','revision') AND post_content LIKE %s", '%' . $wpdb->esc_like($base) . '%'));
             $usada = $usada || (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p ON p.ID=m.post_id WHERE m.meta_key='_thumbnail_id' AND m.meta_value=%s AND p.post_type<>'post'", (string)$id));
+            // 1.7.39: también si la usa Elementor, una galería de WooCommerce, un ajuste o un término
+            if (!$usada && $base !== '') $usada = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key IN ('_elementor_data','_product_image_gallery','_thumbnail_id') AND (meta_value LIKE %s OR meta_value LIKE %s)", '%' . $wpdb->esc_like($base) . '%', '%"id":' . (int)$id . '%'))
+                || (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_value LIKE %s", '%' . $wpdb->esc_like($base) . '%'))
+                || (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key='_product_image_gallery' AND CONCAT(',', meta_value, ',') LIKE %s", '%,' . (int)$id . ',%'));
             if ($usada) { $saltadas++; update_post_meta((int)$id, '_planb_no_tocar', 1); continue; }
             if (wp_delete_attachment((int)$id, true)) $hecho++;
         }
-        $quedan = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} a LEFT JOIN {$wpdb->posts} p ON p.ID=a.post_parent LEFT JOIN {$wpdb->postmeta} nt ON nt.post_id=a.ID AND nt.meta_key='_planb_no_tocar' WHERE nt.meta_id IS NULL AND a.post_type='attachment' AND ((p.ID IS NOT NULL AND p.post_type='post' AND p.post_status='trash') OR a.post_title REGEXP 'casino|kasyn|bet|slot|bonus|roulette|poker|aviator|pin-?up' OR a.guid REGEXP 'casino|kasyn|slot|bonus|roulette|poker|aviator|pin-?up')");
+        $quedan = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} a LEFT JOIN {$wpdb->posts} p ON p.ID=a.post_parent LEFT JOIN {$wpdb->postmeta} nt ON nt.post_id=a.ID AND nt.meta_key='_planb_no_tocar' WHERE nt.meta_id IS NULL AND a.post_type='attachment' AND ((p.ID IS NOT NULL AND p.post_type='post' AND p.post_status='trash') OR a.post_title REGEXP 'casino|kasyn|kazino|betway|bet365|1xbet|melbet|mostbet|vavada|parimatch|leovegas|joycasino' OR a.guid REGEXP 'casino|kasyn|kazino|betway|bet365|1xbet|melbet|mostbet|vavada|parimatch|leovegas|joycasino')");
         return array('hecho' => $hecho, 'quedan' => $quedan, 'saltadas' => $saltadas);
     }
     if ($que === 'papelera') {

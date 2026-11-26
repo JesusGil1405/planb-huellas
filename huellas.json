@@ -140,6 +140,17 @@
                 "rescate.php": "32f4abe1080213fbeadade892a50c43c31847afea737184beb6bda1923651ddd"
             },
             "publicado": "2026-11-25T16:32:35+00:00"
+        },
+        "1.7.37": {
+            "archivos": {
+                "cacert.pem": "d87887200c9a705dccc937b9b83b5e67e47024c4a4b7f9dd15700c72e0f55453",
+                "limpieza.php": "3c5f7f060ae0812287205105ff9871a9e28c1b1487ec60de59f3b86141f92759",
+                "piel.php": "de562d3d93f187d5808ac0b0e3d9f5fdf33787bc79d836a97f33cd0621a0433d",
+                "planb-conector.php": "d52517af5b1b7abea9c69ac35dbd1ba956454ecce1590db0e5d58835bcc442b1",
+                "rescate.php": "b52d2c99e5c8b160b1de3280ccc5aab2372bfad34e68ac2a0556819991e613f9",
+                "restaurar.php": "765e2686823ba7067a647a63aa0da64198e5ed75c79caec4ef21f660fa3a19d7"
+            },
+            "publicado": "2026-11-26T08:43:20+00:00"
         }
     },
     "plugins": {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.40
+ * Version: 1.7.41
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.40');
+define('PLANB_CONECTOR_VERSION', '1.7.41');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -768,6 +768,7 @@ add_action('rest_api_init', function () {
         'usuarios' => array('GET', 'planb_usuarios'),
         'usuario-acceso' => array('POST', 'planb_usuario_acceso'),
         'registro' => array('GET', 'planb_registro'),
+        'entrar' => array('POST', 'planb_entrar_enlace'), // 1.7.41
     );
     // 1.7.37: los trabajos que cambian la web van de uno en uno (si hay otro en marcha, responde 409 «ocupada» y el panel espera)
     $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto', 'mantenimiento');
@@ -2320,3 +2321,47 @@ function planb_tienda(WP_REST_Request $req)
     if (function_exists('wc_get_products')) foreach (wc_get_products(array('stock_status' => 'outofstock', 'limit' => 20, 'status' => 'publish')) as $p) $sin[] = $p->get_name();
     return array('woocommerce' => true, 'moneda' => function_exists('get_woocommerce_currency') ? get_woocommerce_currency() : 'EUR', 'ahora' => $ahora, 'antes' => $antes, 'sin_existencias' => $sin, 'version' => defined('WC_VERSION') ? WC_VERSION : '');
 }
+
+/*
+ * ENTRAR EN EL ESCRITORIO CON UN CLIC (1.7.41 · Jesús, 26/11/2026). Sin contraseñas:
+ *  · el panel pide (firmado) un enlace de UN SOLO USO que caduca en 60 segundos;
+ *  · entra con un administrador que ya existe: el que tenga el correo de la agencia y, si no hay, el primero;
+ *  · el enlace se gasta al usarlo (borrado atómico en la base de datos: dos usos a la vez, solo vale uno);
+ *  · queda apuntado en el registro de la web como «Entra desde el panel», con quién del equipo fue.
+ */
+function planb_entrar_enlace(WP_REST_Request $req)
+{
+    $dom = strtolower(preg_replace('/[^a-z0-9.-]/i', '', (string)$req->get_param('dominio_agencia')));
+    $quien = substr(wp_strip_all_tags((string)$req->get_param('quien')), 0, 60);
+    $admins = get_users(array('role' => 'administrator', 'orderby' => 'ID', 'order' => 'ASC', 'number' => 200));
+    $u = null;
+    if ($dom !== '') foreach ($admins as $a) { $e = strtolower((string)$a->user_email); if (substr($e, -strlen('@' . $dom)) === '@' . $dom) { $u = $a; break; } }
+    if (!$u && $admins) $u = $admins[0];
+    if (!$u) return new WP_Error('sin_admin', 'La web no tiene ningún administrador', array('status' => 404));
+    global $wpdb;
+    $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s AND option_value < %d", $wpdb->esc_like('planb_entrar_') . '%', time() - 600)); // limpieza
+    $t = planb_aleatorio(48);
+    $clave = 'planb_entrar_' . substr(hash('sha256', $t), 0, 40);
+    $wpdb->insert($wpdb->options, array('option_name' => $clave, 'option_value' => (string)(time() + 60) . '|' . (int)$u->ID . '|' . $quien, 'autoload' => 'no'));
+    return array('url' => add_query_arg('planb_entrar', $t, home_url('/')), 'usuario' => $u->user_login, 'caduca' => 60);
+}
+add_action('init', function () {
+    if (!isset($_GET['planb_entrar'])) return;
+    $t = preg_replace('/[^0-9a-zA-Z]/', '', (string)$_GET['planb_entrar']);
+    if (strlen($t) < 40) return;
+    global $wpdb;
+    nocache_headers();
+    $clave = 'planb_entrar_' . substr(hash('sha256', $t), 0, 40);
+    $v = (string)$wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", $clave));
+    $borrado = $v !== '' ? (int)$wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name=%s", $clave)) : 0;
+    $p = explode('|', $v, 3);
+    if ($borrado !== 1 || count($p) < 2 || (int)$p[0] < time()) wp_die('Este enlace para entrar ya se ha usado o ha caducado. Vuelve a pulsar «Entrar en WordPress» en el panel.', 'Enlace caducado', array('response' => 403));
+    $u = get_user_by('id', (int)$p[1]);
+    if (!$u || !user_can($u, 'manage_options')) wp_die('Ese usuario ya no es administrador de esta web.', 'Sin acceso', array('response' => 403));
+    wp_clear_auth_cookie();
+    wp_set_current_user($u->ID);
+    wp_set_auth_cookie($u->ID, false, is_ssl());
+    planb_apuntar('acceso', 'Entra desde el panel', $u->user_login . (isset($p[2]) && $p[2] !== '' ? ' (' . $p[2] . ')' : ''));
+    wp_safe_redirect(admin_url());
+    exit;
+}, 1);

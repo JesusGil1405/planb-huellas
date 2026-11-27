@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.41
+ * Version: 1.7.42
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.41');
+define('PLANB_CONECTOR_VERSION', '1.7.42');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -377,7 +377,9 @@ function planb_apuntar($tipo, $accion, $objeto = '')
     $u = function_exists('wp_get_current_user') ? wp_get_current_user() : null;
     $quien = $u && $u->ID ? $u->user_login : ((defined('REST_REQUEST') && REST_REQUEST && strpos((string)(isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : ''), 'planb') !== false) ? 'Panel' : (defined('DOING_CRON') && DOING_CRON ? 'Tarea automática' : 'Sin sesión'));
     $t = planb_registro_tabla();
-    $wpdb->insert($t, array('fecha' => current_time('mysql', true), 'usuario' => substr($quien, 0, 60), 'tipo' => $tipo, 'accion' => substr($accion, 0, 120), 'objeto' => substr(wp_strip_all_tags((string)$objeto), 0, 255)));
+    $fila = array('fecha' => current_time('mysql', true), 'usuario' => substr($quien, 0, 60), 'tipo' => $tipo, 'accion' => substr($accion, 0, 120), 'objeto' => substr(wp_strip_all_tags((string)$objeto), 0, 255));
+    $wpdb->insert($t, $fila);
+    if ($wpdb->insert_id) planb_empujar((int)$wpdb->insert_id, $fila); // 1.7.42: lo importante, al panel en el momento
     if (mt_rand(1, 50) === 1) { $max = (int)$wpdb->get_var("SELECT MAX(id) FROM `$t`"); if ($max > 2000) $wpdb->query($wpdb->prepare("DELETE FROM `$t` WHERE id < %d", $max - 2000)); }
 }
 add_action('transition_post_status', function ($nuevo, $viejo, $post) {
@@ -769,6 +771,7 @@ add_action('rest_api_init', function () {
         'usuario-acceso' => array('POST', 'planb_usuario_acceso'),
         'registro' => array('GET', 'planb_registro'),
         'entrar' => array('POST', 'planb_entrar_enlace'), // 1.7.41
+        'trampa-registro' => array('POST', 'planb_trampa_registro_ruta'), // 1.7.42
     );
     // 1.7.37: los trabajos que cambian la web van de uno en uno (si hay otro en marcha, responde 409 «ocupada» y el panel espera)
     $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto', 'mantenimiento');
@@ -999,6 +1002,7 @@ function planb_estado(WP_REST_Request $req)
         'temas' => $temas,
         'puntos' => planb_lista_puntos(),
         'puntos_incompletos' => planb_lista_puntos(true), // 1.7.39
+        'trampa_registro' => get_option('planb_trampa_registro') === '1' ? array('activa' => true, 'frenados' => (int)get_option('planb_trampa_frenados', 0)) : array('activa' => false), // 1.7.42
         'rescate' => plugins_url('rescate.php', __FILE__),
         'ruta' => ABSPATH,
         'seguridad' => planb_seguridad(),
@@ -2365,3 +2369,69 @@ add_action('init', function () {
     wp_safe_redirect(admin_url());
     exit;
 }, 1);
+
+/*
+ * AVISOS AL MOMENTO (1.7.42 · Jesús, 27/11/2026: «los avisos de Telegram llegan muy tarde»). Antes el panel leía el registro
+ * de cada web una vez por hora. Ahora, cuando pasa algo importante (entra alguien del equipo de la web en el escritorio, se crea
+ * un administrador, cambia un rol, se instala, activa o borra un plugin, cambia el tema o un ajuste clave), la web se lo dice
+ * al panel en ese momento. Sin esperar respuesta (no frena la web) y firmado con su clave. La lectura de cada hora sigue
+ * de respaldo. Lo que hace el propio panel y las entradas de clientes de la tienda no se mandan.
+ */
+function planb_empujar($rid, $f)
+{
+    if (strpos(PLANB_PANEL_URL, '__') === 0 || strpos((string)get_option('planb_registro'), 'ok 200') !== 0) return;
+    $a = (string)$f['accion']; $o = (string)$f['objeto']; $u = (string)$f['usuario'];
+    if (in_array($u, array('Panel', 'Tarea automática'), true)) return;
+    $importante = $a === 'Entra en WordPress' || in_array($a, array('Tema cambiado', 'Usuario borrado'), true) || strpos($a, 'Ajuste cambiado') === 0
+        || preg_match('/^Plugin (activado|desactivado|borrado)$|^(Plugin|Tema) instalado|^(A la papelera|Despublicado|Borrado para siempre) \(page\)/', $a)
+        || ($a === 'Usuario creado' && preg_match('/administrator|editor|shop_manager|author/i', $o)) || ($a === 'Rol cambiado' && preg_match('/administrator|editor|shop_manager/i', $o));
+    if (!$importante) return;
+    if ($a === 'Entra en WordPress') { $us = get_user_by('login', $o); if (!$us || !user_can($us, 'edit_posts')) return; } // clientes de la tienda: no
+    $n = (int)get_transient('planb_empujes'); if ($n >= 30) return; set_transient('planb_empujes', $n + 1, 600); // como mucho 30 cada 10 min
+    $sec = (string)get_option('planb_secreto'); if ($sec === '') return;
+    $t = (string)time();
+    $c = array('url' => home_url('/'), 't' => $t, 'rid' => (string)(int)$rid, 'fecha' => (string)$f['fecha'], 'usuario' => $u, 'tipo' => (string)$f['tipo'], 'accion' => $a, 'objeto' => $o);
+    $c['firma'] = hash_hmac('sha256', implode('|', array($c['url'], $t, $c['rid'], $c['fecha'], $u, $c['tipo'], $a, $o)), $sec);
+    wp_remote_post(rtrim(PLANB_PANEL_URL, '/') . '/aviso_web.php', array('timeout' => 2, 'blocking' => false, 'body' => $c));
+}
+
+/*
+ * TRAMPA PARA ROBOTS EN EL REGISTRO (1.7.42 · Jesús, 27/11/2026: cuentas falsas de cliente en anchoashazas).
+ * Solo si el panel la activa en esta web. Añade al formulario de registro (el de «Mi cuenta» de WooCommerce y el de
+ * WordPress) una casilla que las personas no ven; los robots la rellenan y su registro se rechaza. No toca los pedidos,
+ * ni la compra como invitado, ni el alta de cuenta al pagar.
+ */
+function planb_trampa_registro_ruta(WP_REST_Request $req)
+{
+    $on = (string)$req->get_param('activo') === '1';
+    update_option('planb_trampa_registro', $on ? '1' : '0', false);
+    planb_apuntar('seguridad', $on ? 'Trampa para robots en el registro activada' : 'Trampa para robots en el registro quitada', '');
+    return array('activa' => $on, 'frenados' => (int)get_option('planb_trampa_frenados', 0));
+}
+function planb_trampa_campo()
+{
+    echo '<p class="planb-ct" style="position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important" aria-hidden="true">'
+        . '<label for="pb_ct_nombre2">No rellenes esto</label><input type="text" name="pb_ct_nombre2" id="pb_ct_nombre2" value="" tabindex="-1" autocomplete="new-password"></p>';
+}
+function planb_trampa_cazado()
+{
+    return isset($_POST['pb_ct_nombre2']) && trim((string)$_POST['pb_ct_nombre2']) !== '';
+}
+function planb_trampa_apuntar()
+{
+    update_option('planb_trampa_frenados', (int)get_option('planb_trampa_frenados', 0) + 1, false);
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? preg_replace('/\.\d+$/', '.x', (string)$_SERVER['REMOTE_ADDR']) : '';
+    planb_apuntar('seguridad', 'Registro de robot frenado', $ip);
+}
+if (get_option('planb_trampa_registro') === '1') {
+    add_action('woocommerce_register_form', 'planb_trampa_campo');
+    add_action('register_form', 'planb_trampa_campo');
+    add_filter('woocommerce_process_registration_errors', function ($err) {
+        if (planb_trampa_cazado() && is_wp_error($err)) { planb_trampa_apuntar(); $err->add('registration-error-planb', 'No se ha podido crear la cuenta. Si eres una persona, vuelve a intentarlo.'); }
+        return $err;
+    }, 10, 1);
+    add_filter('registration_errors', function ($err) {
+        if (planb_trampa_cazado() && is_wp_error($err)) { planb_trampa_apuntar(); $err->add('planb_robot', 'No se ha podido crear la cuenta.'); }
+        return $err;
+    }, 10, 1);
+}

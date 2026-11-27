@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.42
+ * Version: 1.7.43
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.42');
+define('PLANB_CONECTOR_VERSION', '1.7.43');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -772,6 +772,7 @@ add_action('rest_api_init', function () {
         'registro' => array('GET', 'planb_registro'),
         'entrar' => array('POST', 'planb_entrar_enlace'), // 1.7.41
         'trampa-registro' => array('POST', 'planb_trampa_registro_ruta'), // 1.7.42
+        'clave-nueva' => array('POST', 'planb_clave_nueva'), // 1.7.43
     );
     // 1.7.37: los trabajos que cambian la web van de uno en uno (si hay otro en marcha, responde 409 «ocupada» y el panel espera)
     $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto', 'mantenimiento');
@@ -2324,6 +2325,20 @@ function planb_tienda(WP_REST_Request $req)
     $sin = array();
     if (function_exists('wc_get_products')) foreach (wc_get_products(array('stock_status' => 'outofstock', 'limit' => 20, 'status' => 'publish')) as $p) $sin[] = $p->get_name();
     return array('woocommerce' => true, 'moneda' => function_exists('get_woocommerce_currency') ? get_woocommerce_currency() : 'EUR', 'ahora' => $ahora, 'antes' => $antes, 'sin_existencias' => $sin, 'version' => defined('WC_VERSION') ? WC_VERSION : '');
+}
+
+/*
+ * CAMBIO DE CLAVE DESDE EL PANEL (1.7.43 · Jesús, 27/11/2026). El panel manda, firmada con la clave actual, una clave nueva.
+ * Desde ese momento solo vale la nueva: una orden firmada con la anterior se rechaza. Se guarda también la copia de rescate.
+ */
+function planb_clave_nueva(WP_REST_Request $req)
+{
+    $n = (string)$req->get_param('secreto');
+    if (!preg_match('/^[a-f0-9]{48}$/', $n)) return new WP_Error('clave_mala', 'Clave nueva no valida', array('status' => 400));
+    update_option('planb_secreto', $n, false);
+    delete_option('planb_secreto_anterior');
+    planb_guardar_clave();
+    return array('ok' => 1, 'huella' => substr(hash('sha256', $n), 0, 16));
 }
 
 /*

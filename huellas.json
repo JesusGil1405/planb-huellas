@@ -222,6 +222,18 @@
                 "seguro.php": "12103b6fddb19fcbc09ad6a130718fe0eab4427ff1706ffe82ad9c4f966b1510"
             },
             "publicado": "2026-11-27T10:59:53+00:00"
+        },
+        "1.7.44": {
+            "archivos": {
+                "cacert.pem": "d87887200c9a705dccc937b9b83b5e67e47024c4a4b7f9dd15700c72e0f55453",
+                "limpieza.php": "d786f3c17a9702b2f220a5b9dae3480113f07fc57104ef9b7aeec8264eccfd92",
+                "piel.php": "de562d3d93f187d5808ac0b0e3d9f5fdf33787bc79d836a97f33cd0621a0433d",
+                "planb-conector.php": "68c2c36ba3fb5d87ae7a14f4364a7323f62ca81305c35c24fde37e94068beded",
+                "rescate.php": "82b0dd0c43223683622deae14d60130dcf118e9952f82917836fa5b6f2768a5b",
+                "restaurar.php": "2893132ba918cc2d24bb8c9a9c4223f2843732c83e36df25db882a008ef375f7",
+                "seguro.php": "12103b6fddb19fcbc09ad6a130718fe0eab4427ff1706ffe82ad9c4f966b1510"
+            },
+            "publicado": "2026-11-27T22:26:48+00:00"
         }
     },
     "plugins": {
@@ -353,12 +365,13 @@
         "8189bb04ffe304f4b16534f79d123e83b1d9872113da84cee465d16882e746d1": "2026-11-26T16:01:58+00:00",
         "dccfbc37156e578c2a4f4e53393ee8500a0dfb5a8ac6f1eb2d1c7d2fabd587e5": "2026-11-26T16:01:58+00:00",
         "6338a84a300fb558b0b86e7c3f70652f77a68a9d24fdc7121d83ad1e423068aa": "2026-11-26T16:01:58+00:00",
-        "e4b00758460f89e9a14202becf7cae2b5a748bb784736b97c5539b903d46c3e8": "2026-11-27T01:44:55+00:00"
+        "e4b00758460f89e9a14202becf7cae2b5a748bb784736b97c5539b903d46c3e8": "2026-11-27T01:44:55+00:00",
+        "62470e08734f2ebb93ff5eaa9b6d760ddd4688b6ed03de6d1dc07a2852d7b581": "2026-11-27T22:26:50+00:00"
     },
     "envato_versiones": {
         "13881105": "4.8",
         "7808948": "4.0",
-        "11498469": "3.4.9",
+        "11498469": "3.5.0",
         "38313875": "1.0",
         "20515113": "2.2.5",
         "22388133": "2.0.9",

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.43
+ * Version: 1.7.44
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.43');
+define('PLANB_CONECTOR_VERSION', '1.7.44');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -773,6 +773,7 @@ add_action('rest_api_init', function () {
         'entrar' => array('POST', 'planb_entrar_enlace'), // 1.7.41
         'trampa-registro' => array('POST', 'planb_trampa_registro_ruta'), // 1.7.42
         'clave-nueva' => array('POST', 'planb_clave_nueva'), // 1.7.43
+        'pago-prueba' => array('POST', 'planb_pago_prueba'), // 1.7.44
     );
     // 1.7.37: los trabajos que cambian la web van de uno en uno (si hay otro en marcha, responde 409 «ocupada» y el panel espera)
     $pesadas = array('punto', 'actualizar', 'restaurar', 'instalar-zip', 'actualizar-bd', 'quitar-plugin', 'quitar-tema', 'desactivar-plugin', 'limpiar', 'deshacer-limpieza', 'optimizar-bd', 'elementor-arreglar', 'oew-arranque', 'borrar-punto', 'mantenimiento');
@@ -2296,6 +2297,76 @@ function planb_cobros(WP_REST_Request $req)
     if (function_exists('WC') && WC()->payment_gateways()) foreach (WC()->payment_gateways()->get_available_payment_gateways() as $g) $activas[] = (string)$g->get_title();
     return array('woocommerce' => true, 'ahora' => $ahora, 'pagados_30d' => count($n30), 'ultimo_pagado' => $ultimo, 'fallidos_24h' => count($fallidos),
         'atascados_24h' => count($atascados), 'metodos' => $metodos, 'formas_activas' => $activas);
+}
+
+/**
+ * 1.7.44 · Prueba de pago hasta la pantalla del banco, SIN pagar (Jesús, 27/11/2026: «no puedo dejar a los clientes sin
+ * vender»). Tras actualizar una tienda, el panel comprueba que cada forma de pago que lleva al banco (Redsys, Bizum,
+ * PayPal…) sigue llevando: se crea un pedido de prueba «pendiente de pago», la pasarela prepara el pago (como cuando un
+ * cliente pulsa «Realizar el pedido») y el panel mira que la pantalla del banco se abra. Después el pedido se borra.
+ * - Nunca se cobra nada: el pago se queda en la pantalla del banco, sin datos de tarjeta.
+ * - No sale ningún correo mientras se hace (ni a la tienda ni al cliente).
+ * - Solo pasarelas que llevan a otra página; las de tarjeta dentro de la página (Stripe…) y las de transferencia o contra
+ *   reembolso no se prueban así.
+ * - El pedido lleva la marca _planb_prueba y solo se pueden borrar pedidos con esa marca.
+ * accion=crear (pasarela, email) · accion=borrar (pedidos[])
+ */
+function planb_pago_prueba(WP_REST_Request $req)
+{
+    if (!class_exists('WooCommerce') || !function_exists('wc_create_order') || !function_exists('WC')) return array('woocommerce' => false);
+    @set_time_limit(120);
+    $accion = (string)$req->get_param('accion');
+    if ($accion === 'borrar') {
+        $hechos = array();
+        foreach ((array)$req->get_param('pedidos') as $id) {
+            $o = wc_get_order((int)$id);
+            if (!$o || $o->get_meta('_planb_prueba') !== '1') continue;
+            // Si la pasarela hubiera llegado a apartar existencias, se devuelven
+            if (in_array($o->get_status(), array('on-hold', 'processing'), true) && function_exists('wc_increase_stock_levels')) wc_increase_stock_levels($o);
+            $o->delete(true);
+            $hechos[] = (int)$id;
+        }
+        return array('borrados' => $hechos);
+    }
+    $pasarela = sanitize_key((string)$req->get_param('pasarela'));
+    $todas = WC()->payment_gateways() ? WC()->payment_gateways()->payment_gateways() : array();
+    if ($pasarela === '' || !isset($todas[$pasarela])) return array('probado' => false, 'motivo' => 'pasarela no encontrada');
+    $gw = $todas[$pasarela];
+    if (!isset($gw->enabled) || $gw->enabled !== 'yes') return array('probado' => false, 'motivo' => 'pasarela apagada');
+    // El producto más barato a la venta, sencillo y con existencias
+    $prod = null;
+    if (function_exists('wc_get_products')) foreach (wc_get_products(array('status' => 'publish', 'type' => 'simple', 'stock_status' => 'instock', 'limit' => 20, 'orderby' => 'price', 'order' => 'ASC')) as $p) {
+        if ($p->is_purchasable() && (float)$p->get_price() > 0) { $prod = $p; break; }
+    }
+    if (!$prod) return array('probado' => false, 'motivo' => 'no hay ningún producto sencillo a la venta');
+    // Ningún correo mientras se prepara el pedido de prueba
+    add_filter('pre_wp_mail', '__return_true', 1);
+    $email = sanitize_email((string)$req->get_param('email'));
+    if (!is_email($email)) $email = (string)get_option('admin_email');
+    $o = null;
+    try {
+        $o = wc_create_order(array('status' => 'pending', 'customer_note' => 'Prueba automática del panel de mantenimiento (no es un pedido real; se borra sola).'));
+        if (is_wp_error($o) || !$o) return array('probado' => false, 'motivo' => 'no se pudo crear el pedido de prueba');
+        $o->add_meta_data('_planb_prueba', '1', true);
+        $o->add_product($prod, 1);
+        $dir = array('first_name' => 'Prueba', 'last_name' => 'Panel', 'email' => $email, 'phone' => '600000000', 'address_1' => 'Calle Prueba 1', 'city' => 'Madrid', 'postcode' => '28001', 'country' => 'ES', 'state' => 'M');
+        $o->set_address($dir, 'billing');
+        $o->set_address($dir, 'shipping');
+        $o->set_payment_method($gw);
+        $o->calculate_totals();
+        $o->save();
+        if (function_exists('WC') && WC()->session === null && class_exists('WC_Session_Handler')) { WC()->session = new WC_Session_Handler(); WC()->session->init(); }
+        ob_start();
+        $r = $gw->process_payment($o->get_id());
+        ob_end_clean();
+        $ok = is_array($r) && isset($r['result']) && $r['result'] === 'success';
+        return array('probado' => true, 'pedido' => $o->get_id(), 'ok' => $ok, 'redirect' => $ok && !empty($r['redirect']) ? (string)$r['redirect'] : '',
+            'estado' => $o->get_status(), 'motivo' => $ok ? '' : 'la pasarela no prepara el pago');
+    } catch (Exception $e) {
+        return array('probado' => true, 'pedido' => $o ? $o->get_id() : 0, 'ok' => false, 'redirect' => '', 'motivo' => substr($e->getMessage(), 0, 200));
+    } catch (Throwable $e) {
+        return array('probado' => true, 'pedido' => $o ? $o->get_id() : 0, 'ok' => false, 'redirect' => '', 'motivo' => substr($e->getMessage(), 0, 200));
+    }
 }
 
 /**

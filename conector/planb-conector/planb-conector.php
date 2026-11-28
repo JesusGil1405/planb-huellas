@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Plan B Conector
  * Description: Conecta esta web con el Panel Plan B para el mantenimiento automático (estado, puntos de restauración, actualizaciones y clones de prueba).
- * Version: 1.7.44
+ * Version: 1.7.45
  * Author: Plan B Ecommerce
  * Requires PHP: 5.6
  * License: Propietaria
@@ -11,7 +11,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('PLANB_CONECTOR_VERSION', '1.7.44');
+define('PLANB_CONECTOR_VERSION', '1.7.45');
 if (!defined('PLANB_PANEL_URL')) define('PLANB_PANEL_URL', '__PANEL_URL__');
 if (!defined('PLANB_CLAVE_REGISTRO')) define('PLANB_CLAVE_REGISTRO', '__CLAVE_REGISTRO__');
 // 1.7.21 (auditoría): clave de alta de UN SOLO USO, propia de cada descarga. Las actualizaciones no llevan ninguna clave de alta:
@@ -2316,11 +2316,14 @@ function planb_pago_prueba(WP_REST_Request $req)
     if (!class_exists('WooCommerce') || !function_exists('wc_create_order') || !function_exists('WC')) return array('woocommerce' => false);
     @set_time_limit(120);
     $accion = (string)$req->get_param('accion');
+    // 1.7.45 (Tanda 4 · 14): ningún correo en ninguna de las dos acciones (ni al cliente ni a la tienda)
+    add_filter('pre_wp_mail', '__return_true', 1);
     if ($accion === 'borrar') {
         $hechos = array();
         foreach ((array)$req->get_param('pedidos') as $id) {
             $o = wc_get_order((int)$id);
-            if (!$o || $o->get_meta('_planb_prueba') !== '1') continue;
+            // Solo pedidos creados por esta ruta (marca y hora propias) en los últimos 30 minutos
+            if (!$o || $o->get_meta('_planb_prueba') !== '1' || (int)$o->get_meta('_planb_prueba_t') < time() - 1800) continue;
             // Si la pasarela hubiera llegado a apartar existencias, se devuelven
             if (in_array($o->get_status(), array('on-hold', 'processing'), true) && function_exists('wc_increase_stock_levels')) wc_increase_stock_levels($o);
             $o->delete(true);
@@ -2328,17 +2331,28 @@ function planb_pago_prueba(WP_REST_Request $req)
         }
         return array('borrados' => $hechos);
     }
+    // 1.7.45: por defecto solo en la COPIA de prueba. En la tienda real solo si el panel lo pide expresamente (permiso
+    // por tienda, con el código del móvil), sin plugin de facturas (no dejar huecos en la serie) y como mucho 1 vez al día.
+    $esCopia = strpos((string)home_url(), 'planb-clon') !== false;
+    if (!$esCopia) {
+        if ((string)$req->get_param('real') !== '1') return array('probado' => false, 'motivo' => 'en la tienda real solo con permiso expreso de esta tienda');
+        $activos = (array)get_option('active_plugins', array());
+        foreach ($activos as $pl) if (preg_match('/invoice|factura|wpo-wcpdf|pdf-invoices|sequential-order|holded|quipu|facturascripts|billin/i', (string)$pl)) return array('probado' => false, 'motivo' => 'la tienda tiene un plugin de facturas: en la tienda real no se prueba (podría dejar un hueco en la numeración)');
+        $dia = (array)get_option('planb_pago_prueba_dia', array());
+        if (isset($dia['d']) && $dia['d'] === gmdate('Y-m-d') && (int)$dia['n'] >= 1) return array('probado' => false, 'motivo' => 'ya se probó hoy en la tienda real (máximo 1 al día, para no activar el antifraude del banco)');
+        update_option('planb_pago_prueba_dia', array('d' => gmdate('Y-m-d'), 'n' => (isset($dia['d']) && $dia['d'] === gmdate('Y-m-d') ? (int)$dia['n'] : 0) + 1), false);
+    }
     $pasarela = sanitize_key((string)$req->get_param('pasarela'));
     $todas = WC()->payment_gateways() ? WC()->payment_gateways()->payment_gateways() : array();
     if ($pasarela === '' || !isset($todas[$pasarela])) return array('probado' => false, 'motivo' => 'pasarela no encontrada');
     $gw = $todas[$pasarela];
     if (!isset($gw->enabled) || $gw->enabled !== 'yes') return array('probado' => false, 'motivo' => 'pasarela apagada');
-    // El producto más barato a la venta, sencillo y con existencias
+    // El producto más barato a la venta, sencillo, con existencias y SIN gestión de stock (así no se aparta ninguna unidad)
     $prod = null;
-    if (function_exists('wc_get_products')) foreach (wc_get_products(array('status' => 'publish', 'type' => 'simple', 'stock_status' => 'instock', 'limit' => 20, 'orderby' => 'price', 'order' => 'ASC')) as $p) {
-        if ($p->is_purchasable() && (float)$p->get_price() > 0) { $prod = $p; break; }
+    if (function_exists('wc_get_products')) foreach (wc_get_products(array('status' => 'publish', 'type' => 'simple', 'stock_status' => 'instock', 'limit' => 50, 'orderby' => 'price', 'order' => 'ASC')) as $p) {
+        if ($p->is_purchasable() && (float)$p->get_price() > 0 && !$p->get_manage_stock()) { $prod = $p; break; }
     }
-    if (!$prod) return array('probado' => false, 'motivo' => 'no hay ningún producto sencillo a la venta');
+    if (!$prod) return array('probado' => false, 'motivo' => 'no hay ningún producto sencillo a la venta sin control de existencias');
     // Ningún correo mientras se prepara el pedido de prueba
     add_filter('pre_wp_mail', '__return_true', 1);
     $email = sanitize_email((string)$req->get_param('email'));
@@ -2348,6 +2362,8 @@ function planb_pago_prueba(WP_REST_Request $req)
         $o = wc_create_order(array('status' => 'pending', 'customer_note' => 'Prueba automática del panel de mantenimiento (no es un pedido real; se borra sola).'));
         if (is_wp_error($o) || !$o) return array('probado' => false, 'motivo' => 'no se pudo crear el pedido de prueba');
         $o->add_meta_data('_planb_prueba', '1', true);
+        $o->add_meta_data('_planb_prueba_t', (string)time(), true);
+        if (method_exists($o, 'set_created_via')) $o->set_created_via('planb-prueba'); // sin cupones: el pedido se arma a mano, nunca desde el carrito
         $o->add_product($prod, 1);
         $dir = array('first_name' => 'Prueba', 'last_name' => 'Panel', 'email' => $email, 'phone' => '600000000', 'address_1' => 'Calle Prueba 1', 'city' => 'Madrid', 'postcode' => '28001', 'country' => 'ES', 'state' => 'M');
         $o->set_address($dir, 'billing');
